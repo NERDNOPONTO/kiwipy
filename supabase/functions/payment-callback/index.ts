@@ -24,6 +24,10 @@ serve(async (req) => {
   try {
     const supabaseUrl = Deno.env.get('SUPABASE_URL');
     const supabaseKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
+    
+    // Configuração da URL do Frontend para redirecionamento
+    // Deve ser configurada nos Segredos do Supabase: FRONTEND_URL = https://seu-projeto.vercel.app
+    const frontendUrl = Deno.env.get('FRONTEND_URL') || "https://culonga.com";
 
     if (!supabaseUrl || !supabaseKey) {
         console.error("[Payment Callback] ERRO CRÍTICO: Variáveis de ambiente SUPABASE_URL ou SUPABASE_SERVICE_ROLE_KEY não definidas.");
@@ -77,11 +81,11 @@ serve(async (req) => {
            
            // Fallback: Redirecionar para o frontend com o token para que o frontend tente resolver ou mostrar sucesso.
            // O frontend já tem lógica para lidar com ?token=...
-           return Response.redirect(`https://culonga.com/culongaPay?token=${token}&status=unknown`, 303);
+           return Response.redirect(`${frontendUrl}/culongaPay?token=${token}&status=unknown`, 303);
        }
 
        console.log("Sem referência e sem token, redirecionando para erro");
-       return Response.redirect("https://culonga.com/culongaPay?error=missing_reference", 303);
+       return Response.redirect(`${frontendUrl}/culongaPay?error=missing_reference`, 303);
     }
 
     // 1. Validar autenticidade (TODO: Implementar validação de assinatura/token se disponível)
@@ -158,7 +162,7 @@ serve(async (req) => {
     // 4. Resposta final dependendo do método
     if (req.method === 'GET') {
         // Se for o navegador do usuário, redireciona para o frontend
-        return Response.redirect(`https://culonga.com/culongaPay?status=${status || 'processed'}&reference=${orderRef}`, 303);
+        return Response.redirect(`${frontendUrl}/culongaPay?status=${status || 'processed'}&reference=${orderRef}`, 303);
     } else {
         // Se for notificação servidor-servidor (POST), retorna JSON 200
         return new Response(JSON.stringify({ message: "Callback processed successfully", order_id: order.id }), { 
@@ -172,7 +176,7 @@ serve(async (req) => {
     
     if (req.method === 'GET') {
         // Em caso de erro no navegador, redirecionar para mostrar erro no frontend
-        return Response.redirect(`https://culonga.com/culongaPay?status=error&message=${encodeURIComponent(error.message)}`, 303);
+        return Response.redirect(`${frontendUrl}/culongaPay?status=error&message=${encodeURIComponent(error.message)}`, 303);
     } else {
         // Em caso de erro no webhook, retornar erro JSON
         return new Response(JSON.stringify({ error: error.message }), { 

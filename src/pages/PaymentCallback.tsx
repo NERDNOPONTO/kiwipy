@@ -41,20 +41,41 @@ const PaymentCallback = () => {
         // Para simplificar a experiência do usuário agora:
         // Se viemos da EMIS com um token, assumimos sucesso preliminar e pedimos ao backend para confirmar.
         
-        // Chamar Edge Function para validar e atualizar o pedido
-        const { data, error } = await supabase.functions.invoke('payment-callback', {
-          body: { 
-            reference, 
-            token,
-            status: 'SUCCESS' // Assumimos sucesso se chegou aqui com token, mas o backend pode verificar na EMIS se quiser
+        // Verificar status real do pedido no banco de dados
+        if (reference) {
+          const { data: order, error: orderError } = await supabase
+            .from('orders')
+            .select('status')
+            .eq('reference', reference)
+            .single();
+
+          if (orderError) throw orderError;
+
+          if (order?.status === 'approved') {
+            setStatus("success");
+            setMessage("Pagamento confirmado! O seu acesso foi liberado.");
+            toast.success("Pagamento confirmado!");
+          } else if (order?.status === 'pending') {
+            setStatus("loading");
+            setMessage("Pagamento em processamento. Aguarde um momento...");
+            // Opcional: Implementar polling ou reload após alguns segundos
+            setTimeout(() => window.location.reload(), 3000);
+            return; 
+          } else {
+            setStatus("error");
+            setMessage("Pagamento não aprovado ou cancelado.");
           }
-        });
-
-        if (error) throw error;
-
-        setStatus("success");
-        setMessage("Pagamento processado com sucesso! O seu acesso será libertado em breve.");
-        toast.success("Pagamento recebido!");
+        } else {
+           // Fallback se não tiver referência (apenas token)
+           // Tentar confiar no status da URL se vier do nosso backend
+           const urlStatus = searchParams.get("status");
+           if (urlStatus === 'success' || urlStatus === 'approved') {
+              setStatus("success");
+              setMessage("Pagamento processado com sucesso!");
+           } else {
+              throw new Error("Referência do pedido não encontrada.");
+           }
+        }
 
       } catch (error: any) {
         console.error("Erro no callback:", error);
