@@ -61,8 +61,15 @@ serve(async (req) => {
     console.log("Payment Callback Payload:", payload);
 
     const { referencia, reference, status, transactionId, token } = payload;
+    
+    // Tratamento de referência aninhada (payload EMIS v2)
+    // Exemplo: "reference": { "id": "ORD-290772734" }
+    let orderRef = referencia || reference;
+    if (typeof orderRef === 'object' && orderRef !== null && orderRef.id) {
+        orderRef = orderRef.id;
+    }
+
     // EMIS às vezes manda 'token' como ID da transação no redirect
-    const orderRef = referencia || reference;
     
     // Se não tiver referência, mas tiver token, talvez seja o callback do browser apenas com token
     // Nesse caso, não conseguimos identificar o pedido facilmente sem consultar a EMIS.
@@ -104,11 +111,23 @@ serve(async (req) => {
       return new Response(JSON.stringify({ error: "Order not found" }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
 
-    // 3. Atualizar estado
-    const newStatus = (status === 'SUCCESS' || status === 'COMPLETED') ? 'approved' : 'rejected';
+    // NORMALIZAÇÃO DE STATUS
+    // Status pode vir em minúsculo, maiúsculo, ou códigos numéricos.
+    let newStatus: 'approved' | 'rejected' | null = null;
+    const normalizedStatus = status ? String(status).toUpperCase() : '';
+
+    console.log(`[Payment Callback] Status recebido: "${status}" (Normalizado: "${normalizedStatus}")`);
+
+    if (['SUCCESS', 'COMPLETED', 'APPROVED', 'PAID', 'OK', '00', 'AUTHORIZED', 'ACCEPTED'].includes(normalizedStatus)) {
+        newStatus = 'approved';
+    } else if (['REJECTED', 'FAILED', 'ERROR', 'CANCELLED', 'RJCT', 'DECLINED'].includes(normalizedStatus)) {
+        newStatus = 'rejected';
+    } else {
+        console.log(`[Payment Callback] Status inconclusivo ou desconhecido: "${status}". O pedido será mantido no estado atual para evitar falsos negativos.`);
+    }
     
-    // Só atualizar se o status mudar e não estiver já aprovado (para evitar duplicidade)
-    if (order.status !== 'approved') {
+    // Só atualizar se tivermos um novo status definido e ele for diferente do atual (ou se for approved e ainda não estiver approved)
+    if (newStatus && order.status !== 'approved') {
       const updateData: any = {
         status: newStatus,
         payment_data: payload,
@@ -153,7 +172,7 @@ serve(async (req) => {
             .insert({
               customer_id: order.customer_id,
               product_id: order.product_id,
-              // order_id: order.id // Se a tabela tiver essa coluna
+              order_id: order.id
             });
         }
       }

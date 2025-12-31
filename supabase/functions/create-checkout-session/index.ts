@@ -18,7 +18,10 @@ const MERCHANT_TOKEN = Deno.env.get("CULONGA_TOKEN"); // Token de comerciante
 const FUNCTION_URL = "https://bmbmkvrypycdttnbeeiq.supabase.co/functions/v1/payment-callback";
 
 // URL final para onde o usuário será enviado após o processamento
-const FRONTEND_SUCCESS_URL = "https://culonga.com/culongaPay";
+// Usa variável de ambiente para suportar Vercel/Localhost, fallback para culonga.com
+const FRONTEND_SUCCESS_URL = Deno.env.get('FRONTEND_URL') 
+  ? `${Deno.env.get('FRONTEND_URL')}/culongaPay`
+  : "https://culonga.com/culongaPay";
 
 serve(async (req) => {
   // CORS Preflight
@@ -97,21 +100,16 @@ serve(async (req) => {
     const emisPayload = {
       reference: reference, 
       amount: Number(product.price).toFixed(2), 
-      token: MERCHANT_TOKEN,
-      
-      // CORREÇÃO CRÍTICA:
-      // O erro 'Unexpected value PAYMENT' indica que algum campo não aceita 'PAYMENT'.
-      // Na documentação:
-      // mobile: "PAYMENT" (Obrigatório) -> Correto
-      // qrCode: "PAYMENT" (Igual a mobile) -> Correto
-      // card: "AUTHORIZATION" ou "DISABLED" -> ERRADO enviar "PAYMENT" aqui!
+      token: MERCHANT_TOKEN, // Frame Token (UUID)
+      terminal: "486467", // Terminal ID (Fornecido pelo usuário)
       
       mobile: "PAYMENT",
-      qr_code: "PAYMENT", // snake_case (Testado com sucesso)
+      qr_code: "PAYMENT", 
       card: "AUTHORIZATION",
       
+      // Enviando ambos formatos para garantir compatibilidade
       callback_url: callbackUrl, 
-      // callbackUrl: callbackUrl, // Removido duplicado para evitar confusão
+      callbackUrl: callbackUrl,
       
       client_name: name,
       client_email: email,
@@ -119,6 +117,12 @@ serve(async (req) => {
     };
 
     console.log("Enviando payload para EMIS:", JSON.stringify(emisPayload));
+
+    // TESTE DE CONECTIVIDADE CALLBACK: Tentar chamar o callback manualmente para verificar se está acessível
+    try {
+        console.log("Teste de pré-validação do callback URL...");
+        fetch(callbackUrl, { method: 'OPTIONS' }).catch(e => console.log("Erro no pré-check do callback (ignorar):", e));
+    } catch (e) {}
 
     const emisResponse = await fetch(EMIS_API_URL, {
       method: 'POST',
