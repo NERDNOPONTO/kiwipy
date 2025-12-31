@@ -8,9 +8,17 @@ const corsHeaders = {
 }
 
 // Configurações da EMIS / Culonga
-const EMIS_API_URL = "https://cerpagamentonline.emis.co.ao/online-payment-gateway/webframe/v1/frameToken";
-const EMIS_FRAME_URL = "https://cerpagamentonline.emis.co.ao/online-payment-gateway/webframe/frame";
-const MERCHANT_TOKEN = Deno.env.get("CULONGA_TOKEN") || "YOUR_MERCHANT_TOKEN"; // Token de comerciante
+// URL de PRODUÇÃO (Confirmado via testes)
+const EMIS_API_URL = "https://pagamentonline.emis.co.ao/online-payment-gateway/webframe/v1/frameToken";
+const EMIS_FRAME_URL = "https://pagamentonline.emis.co.ao/online-payment-gateway/webframe/frame";
+const MERCHANT_TOKEN = Deno.env.get("CULONGA_TOKEN"); // Token de comerciante
+
+// URL para onde a EMIS deve notificar/redirecionar
+// Deve ser esta Edge Function para processarmos o pagamento e gerarmos logs
+const FUNCTION_URL = "https://bmbmkvrypycdttnbeeiq.supabase.co/functions/v1/payment-callback";
+
+// URL final para onde o usuário será enviado após o processamento
+const FRONTEND_SUCCESS_URL = "https://culonga.com/culongaPay";
 
 serve(async (req) => {
   // CORS Preflight
@@ -59,10 +67,18 @@ serve(async (req) => {
     // A referência deve ser única e curta se possível, mas robusta
     const reference = `ORD-${Math.floor(Math.random() * 1000000000)}`;
     
-    // URL de callback registrada na EMIS (Must match exactly what is registered)
-    const callbackUrl = "https://culonga.com/culongaPay";
+    // URL de callback que processa o pagamento e redireciona o usuário
+    const callbackUrl = "https://bmbmkvrypycdttnbeeiq.supabase.co/functions/v1/payment-callback";
 
-    const { data: order, error: orderError } = await supabaseClient
+    // Usar a service role key para operações administrativas (bypassar RLS)
+    const supabaseAdmin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+    )
+    
+    // ... (Manter resto do código)
+
+    const { data: order, error: orderError } = await supabaseAdmin // USAR ADMIN AQUI
       .from('orders')
       .insert({
         reference,
@@ -77,17 +93,29 @@ serve(async (req) => {
 
     if (orderError) throw orderError
 
-    // 5. Criar Payload para EMIS (snake_case conforme descoberto nos testes)
+    // 5. Criar Payload para EMIS
     const emisPayload = {
+      reference: reference, 
+      amount: Number(product.price).toFixed(2), 
       token: MERCHANT_TOKEN,
-      reference: reference, // snake_case
-      amount: product.price.toString(), // deve ser string
-      callback_url: callbackUrl, // snake_case
+      
+      // CORREÇÃO CRÍTICA:
+      // O erro 'Unexpected value PAYMENT' indica que algum campo não aceita 'PAYMENT'.
+      // Na documentação:
+      // mobile: "PAYMENT" (Obrigatório) -> Correto
+      // qrCode: "PAYMENT" (Igual a mobile) -> Correto
+      // card: "AUTHORIZATION" ou "DISABLED" -> ERRADO enviar "PAYMENT" aqui!
+      
+      mobile: "PAYMENT",
+      qr_code: "PAYMENT", // snake_case (Testado com sucesso)
+      card: "AUTHORIZATION",
+      
+      callback_url: callbackUrl, 
+      // callbackUrl: callbackUrl, // Removido duplicado para evitar confusão
+      
       client_name: name,
       client_email: email,
-      client_msisdn: phone,
-      // Tentativa de habilitar métodos de pagamento comuns
-      mobile: "PAYMENT" // Baseado nos testes que retornaram erro de negócio (100/104) em vez de erro de schema
+      client_msisdn: phone
     };
 
     console.log("Enviando payload para EMIS:", JSON.stringify(emisPayload));
@@ -102,31 +130,48 @@ serve(async (req) => {
 
     if (!emisResponse.ok) {
       const errorText = await emisResponse.text();
-      console.error("Erro EMIS:", errorText);
-      throw new Error(`Falha no Gateway de Pagamento: ${errorText}`);
+      console.error("Erro EMIS (Raw):", errorText);
+      
+      let errorJson;
+      try {
+        errorJson = JSON.parse(errorText);
+      } catch (e) {
+        throw new Error(`Erro na EMIS: ${errorText}`);
+      }
+
+      // Tratar erros específicos da EMIS
+      if (errorJson.code === "104" && errorJson.message === "invalid frame token") {
+         throw new Error("Erro de Autenticação EMIS (104): O 'CULONGA_TOKEN' (Merchant Token) parece inválido. Verifique se o token no Supabase Secrets está correto e corresponde ao ambiente (Certificação vs Produção).");
+      }
+      
+      throw new Error(`Falha no Gateway de Pagamento: ${JSON.stringify(errorJson)}`);
     }
 
-    const transactionIdRaw = await emisResponse.text();
-    // O retorno pode ser um JSON ou string direta dependendo da versão, mas geralmente é o ID
-    // Vamos limpar aspas extras se houver
-    let transactionId = transactionIdRaw.replace(/['"]+/g, '').trim();
-    
-    // Tentar parsear se for JSON
+    const responseText = await emisResponse.text();
+    let transactionId = responseText.replace(/['"]+/g, '').trim();
+
+    // Tentar extrair o token se a resposta for JSON
     try {
-        const json = JSON.parse(transactionIdRaw);
-        if (json.transactionId) transactionId = json.transactionId;
-        if (json.id) transactionId = json.id;
+        const json = JSON.parse(responseText);
+        if (json && typeof json === 'object') {
+             if (json.token) transactionId = json.token;
+             else if (json.frameToken) transactionId = json.frameToken;
+             else if (json.transactionId) transactionId = json.transactionId;
+             else if (json.id) transactionId = json.id;
+        } else if (typeof json === 'string') {
+             transactionId = json;
+        }
     } catch (e) {
-        // não é json, segue como string
+        // não é json, segue como string limpa
     }
 
     if (!transactionId) {
         throw new Error("ID da transação inválido recebido do gateway");
     }
 
-    // 6. Construir URL do Iframe
-    // Usar a URL fornecida pelo usuário como "real"
-    const paymentUrl = `https://culonga.com/culongaPay?token=${transactionId}`;
+    // 6. Construir URL do Iframe CORRETA (Baseada na documentação/exemplo do usuário)
+    // A URL deve ser a do Webframe da EMIS, não a do nosso site
+    const paymentUrl = `${EMIS_FRAME_URL}?token=${transactionId}`;
 
     return new Response(
       JSON.stringify({ 
