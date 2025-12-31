@@ -1,7 +1,8 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { supabase } from "@/integrations/supabase/client";
 import { 
   Zap, 
   LayoutDashboard, 
@@ -20,6 +21,7 @@ import {
   ExternalLink,
   Copy
 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 const sidebarItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard", active: false },
@@ -30,57 +32,75 @@ const sidebarItems = [
   { icon: Settings, label: "Configurações", href: "/dashboard/settings", active: false },
 ];
 
-const mockProducts = [
-  { 
-    id: "prod_001", 
-    name: "Curso de Marketing Digital Completo", 
-    type: "Curso", 
-    price: "25.000 Kz", 
-    sales: 142,
-    status: "Ativo",
-    image: "📚"
-  },
-  { 
-    id: "prod_002", 
-    name: "Ebook: Vendas Online para Iniciantes", 
-    type: "Ebook", 
-    price: "5.000 Kz", 
-    sales: 89,
-    status: "Ativo",
-    image: "📖"
-  },
-  { 
-    id: "prod_003", 
-    name: "Mentoria Individual 1:1", 
-    type: "Serviço", 
-    price: "150.000 Kz", 
-    sales: 12,
-    status: "Ativo",
-    image: "🎯"
-  },
-  { 
-    id: "prod_004", 
-    name: "Template de Planilhas Financeiras", 
-    type: "Download", 
-    price: "3.500 Kz", 
-    sales: 67,
-    status: "Pausado",
-    image: "📊"
-  },
-];
-
 const Products = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [products, setProducts] = useState<any[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [userEmail, setUserEmail] = useState<string>("");
+  const navigate = useNavigate();
+  const { toast } = useToast();
 
-  const filteredProducts = mockProducts.filter(product =>
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        
+        if (session) {
+          setUserEmail(session.user.email || "");
+
+          // Fetch Profile
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('*')
+            .eq('user_id', session.user.id)
+            .single();
+        
+        if (profile) {
+          setUserProfile(profile);
+
+          // Fetch Products for this producer
+          const { data: productsData, error: productsError } = await supabase
+            .from('products')
+            .select('*')
+            .eq('producer_id', profile.id)
+            .order('created_at', { ascending: false });
+
+          if (productsError) throw productsError;
+          setProducts(productsData || []);
+        }
+        }
+      } catch (error) {
+        console.error("Error fetching data:", error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+
+    fetchData();
+  }, [navigate]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate("/auth");
+  };
+
+  const filteredProducts = products.filter(product =>
     product.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
   const copyCheckoutLink = (productId: string) => {
-    const link = `https://infopay.ao/checkout/${productId}`;
+    const link = `${window.location.origin}/checkout/${productId}`;
     navigator.clipboard.writeText(link);
-    // TODO: Add toast notification
+    toast({
+      title: "Link copiado!",
+      description: "Link de checkout copiado para a área de transferência.",
+    });
+  };
+
+  const formatPrice = (price: number) => {
+    return new Intl.NumberFormat('pt-AO', { style: 'currency', currency: 'AOA' }).format(price);
   };
 
   return (
@@ -122,21 +142,23 @@ const Products = () => {
           <div className="p-4 border-t border-border/50">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-gradient-accent flex items-center justify-center text-accent-foreground font-bold flex-shrink-0">
-                P
+                {userProfile?.full_name?.charAt(0) || userEmail?.charAt(0) || "P"}
               </div>
               {isSidebarOpen && (
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-foreground truncate">Produtor Demo</div>
-                  <div className="text-sm text-muted-foreground truncate">demo@infopay.ao</div>
+                  <div className="font-medium text-foreground truncate">{userProfile?.full_name || "Usuário"}</div>
+                  <div className="text-sm text-muted-foreground truncate">{userEmail}</div>
                 </div>
               )}
             </div>
             {isSidebarOpen && (
-              <Button variant="ghost" className="w-full mt-4 justify-start text-muted-foreground" asChild>
-                <Link to="/">
-                  <LogOut className="w-4 h-4 mr-2" />
-                  Sair
-                </Link>
+              <Button 
+                variant="ghost" 
+                className="w-full mt-4 justify-start text-muted-foreground" 
+                onClick={handleLogout}
+              >
+                <LogOut className="w-4 h-4 mr-2" />
+                Sair
               </Button>
             )}
           </div>
@@ -195,86 +217,101 @@ const Products = () => {
 
           {/* Products Grid */}
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {filteredProducts.map((product) => (
-              <div 
-                key={product.id}
-                className="bg-card rounded-2xl border border-border/50 shadow-card overflow-hidden hover:shadow-xl transition-all duration-300 group"
-              >
-                {/* Product Image/Icon */}
-                <div className="h-32 bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center text-5xl">
-                  {product.image}
-                </div>
-                
-                {/* Product Info */}
-                <div className="p-5">
-                  <div className="flex items-start justify-between gap-3 mb-3">
-                    <div>
-                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                        product.status === 'Ativo' 
-                          ? 'bg-success/10 text-success' 
-                          : 'bg-muted text-muted-foreground'
-                      }`}>
-                        {product.status}
-                      </span>
-                      <h3 className="font-display font-bold text-foreground mt-2 line-clamp-2">
-                        {product.name}
-                      </h3>
+            {isLoading ? (
+               <div className="col-span-full text-center py-10">Carregando produtos...</div>
+            ) : (
+              <>
+                {filteredProducts.length === 0 && searchTerm !== "" ? (
+                   <div className="col-span-full text-center py-10">Nenhum produto encontrado para "{searchTerm}".</div>
+                ) : (
+                  filteredProducts.map((product) => (
+                    <div 
+                      key={product.id}
+                      className="bg-card rounded-2xl border border-border/50 shadow-card overflow-hidden hover:shadow-xl transition-all duration-300 group"
+                    >
+                      {/* Product Image/Icon */}
+                      <div className="h-32 bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center overflow-hidden">
+                        {product.image_url ? (
+                          <img src={product.image_url} alt={product.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <span className="text-5xl">📦</span>
+                        )}
+                      </div>
+                      
+                      {/* Product Info */}
+                      <div className="p-5">
+                        <div className="flex items-start justify-between gap-3 mb-3">
+                          <div>
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              product.is_active 
+                                ? 'bg-success/10 text-success' 
+                                : 'bg-muted text-muted-foreground'
+                            }`}>
+                              {product.is_active ? 'Ativo' : 'Inativo'}
+                            </span>
+                            <h3 className="font-display font-bold text-foreground mt-2 line-clamp-2">
+                              {product.name}
+                            </h3>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between mb-4">
+                          <span className="text-sm text-muted-foreground capitalize">{product.product_type}</span>
+                          <span className="font-display font-bold text-accent">{formatPrice(product.price)}</span>
+                        </div>
+
+                        <div className="flex items-center justify-between pt-4 border-t border-border/50">
+                          <span className="text-sm text-muted-foreground">
+                            0 vendas
+                          </span>
+                          <div className="flex items-center gap-1">
+                            <button 
+                              onClick={() => copyCheckoutLink(product.id)}
+                              className="p-2 hover:bg-secondary rounded-lg transition-colors"
+                              title="Copiar link de checkout"
+                            >
+                              <Copy className="w-4 h-4 text-muted-foreground" />
+                            </button>
+                            <Link 
+                              to={`/checkout/${product.id}`}
+                              className="p-2 hover:bg-secondary rounded-lg transition-colors"
+                              title="Ver checkout"
+                            >
+                              <ExternalLink className="w-4 h-4 text-muted-foreground" />
+                            </Link>
+                            <button 
+                              className="p-2 hover:bg-secondary rounded-lg transition-colors"
+                              title="Editar"
+                            >
+                              <Edit className="w-4 h-4 text-muted-foreground" />
+                            </button>
+                            <button 
+                              className="p-2 hover:bg-destructive/10 rounded-lg transition-colors"
+                              title="Eliminar"
+                            >
+                              <Trash2 className="w-4 h-4 text-destructive" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  </div>
+                  ))
+                )}
 
-                  <div className="flex items-center justify-between mb-4">
-                    <span className="text-sm text-muted-foreground">{product.type}</span>
-                    <span className="font-display font-bold text-accent">{product.price}</span>
-                  </div>
-
-                  <div className="flex items-center justify-between pt-4 border-t border-border/50">
-                    <span className="text-sm text-muted-foreground">
-                      {product.sales} vendas
-                    </span>
-                    <div className="flex items-center gap-1">
-                      <button 
-                        onClick={() => copyCheckoutLink(product.id)}
-                        className="p-2 hover:bg-secondary rounded-lg transition-colors"
-                        title="Copiar link de checkout"
-                      >
-                        <Copy className="w-4 h-4 text-muted-foreground" />
-                      </button>
-                      <Link 
-                        to={`/checkout/${product.id}`}
-                        className="p-2 hover:bg-secondary rounded-lg transition-colors"
-                        title="Ver checkout"
-                      >
-                        <ExternalLink className="w-4 h-4 text-muted-foreground" />
-                      </Link>
-                      <button 
-                        className="p-2 hover:bg-secondary rounded-lg transition-colors"
-                        title="Editar"
-                      >
-                        <Edit className="w-4 h-4 text-muted-foreground" />
-                      </button>
-                      <button 
-                        className="p-2 hover:bg-destructive/10 rounded-lg transition-colors"
-                        title="Eliminar"
-                      >
-                        <Trash2 className="w-4 h-4 text-destructive" />
-                      </button>
+                {searchTerm === "" && (
+                  <Link 
+                    to="/dashboard/products/new"
+                    className="bg-card rounded-2xl border-2 border-dashed border-border hover:border-accent/50 shadow-card overflow-hidden hover:shadow-xl transition-all duration-300 flex flex-col items-center justify-center min-h-[280px] group"
+                  >
+                    <div className="w-16 h-16 rounded-full bg-accent/10 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                      <Plus className="w-8 h-8 text-accent" />
                     </div>
-                  </div>
-                </div>
-              </div>
-            ))}
-
-            {/* Add New Product Card */}
-            <Link 
-              to="/dashboard/products/new"
-              className="bg-card rounded-2xl border-2 border-dashed border-border hover:border-accent/50 shadow-card overflow-hidden hover:shadow-xl transition-all duration-300 flex flex-col items-center justify-center min-h-[280px] group"
-            >
-              <div className="w-16 h-16 rounded-full bg-accent/10 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
-                <Plus className="w-8 h-8 text-accent" />
-              </div>
-              <span className="font-display font-bold text-foreground">Adicionar Produto</span>
-              <span className="text-sm text-muted-foreground mt-1">Criar novo infoproduto</span>
-            </Link>
+                    <span className="font-display font-bold text-foreground">Adicionar Produto</span>
+                    <span className="text-sm text-muted-foreground mt-1">Criar novo infoproduto</span>
+                  </Link>
+                )}
+              </>
+            )}
           </div>
         </div>
       </main>

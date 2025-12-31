@@ -1,12 +1,16 @@
 import { useState, useEffect } from "react";
-import { useSearchParams, Link } from "react-router-dom";
+import { useSearchParams, Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Zap, Mail, Lock, User, ArrowLeft, Eye, EyeOff } from "lucide-react";
+import { supabase } from "@/integrations/supabase/client";
+import { useToast } from "@/hooks/use-toast";
 
 const Auth = () => {
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+  const { toast } = useToast();
   const [isSignup, setIsSignup] = useState(searchParams.get("mode") === "signup");
   const [showPassword, setShowPassword] = useState(false);
   const [formData, setFormData] = useState({
@@ -24,12 +28,53 @@ const Auth = () => {
     e.preventDefault();
     setIsLoading(true);
     
-    // TODO: Integrate with Supabase auth
-    console.log("Form submitted:", formData);
-    
-    setTimeout(() => {
+    try {
+      if (isSignup) {
+        // Sign up logic
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+          email: formData.email,
+          password: formData.password,
+          options: {
+            data: {
+              full_name: formData.name,
+            },
+          },
+        });
+
+        if (authError) throw authError;
+
+        toast({
+          title: "Conta criada com sucesso!",
+          description: "Bem-vindo ao InfoPay.",
+        });
+        
+        navigate("/dashboard");
+      } else {
+        // Sign in logic
+        const { error } = await supabase.auth.signInWithPassword({
+          email: formData.email,
+          password: formData.password,
+        });
+
+        if (error) throw error;
+
+        toast({
+          title: "Login realizado!",
+          description: "Bem-vindo de volta.",
+        });
+        
+        navigate("/dashboard");
+      }
+    } catch (error: any) {
+      console.error("Auth error:", error);
+      toast({
+        variant: "destructive",
+        title: "Erro na autenticação",
+        description: error.message || "Ocorreu um erro ao tentar entrar.",
+      });
+    } finally {
       setIsLoading(false);
-    }, 1500);
+    }
   };
 
   return (

@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { supabase } from "@/integrations/supabase/client";
 import { 
   Zap, 
   Shield, 
@@ -13,27 +14,11 @@ import {
   CheckCircle2,
   ArrowLeft
 } from "lucide-react";
-
-// Mock product data - in real app this would come from API
-const mockProduct = {
-  id: "prod_001",
-  name: "Curso de Marketing Digital Completo",
-  description: "Aprenda do zero ao avançado tudo sobre marketing digital, incluindo SEO, redes sociais, email marketing e muito mais.",
-  price: 25000,
-  priceFormatted: "25.000 Kz",
-  producer: "Academia Digital",
-  image: "📚",
-  features: [
-    "50+ horas de conteúdo em vídeo",
-    "Certificado de conclusão",
-    "Acesso vitalício",
-    "Suporte direto com o instrutor",
-    "Comunidade exclusiva"
-  ]
-};
+import { useToast } from "@/hooks/use-toast";
 
 const Checkout = () => {
   const { productId } = useParams();
+  const { toast } = useToast();
   const [step, setStep] = useState<'form' | 'payment' | 'success'>('form');
   const [formData, setFormData] = useState({
     name: "",
@@ -41,24 +26,129 @@ const Checkout = () => {
     phone: ""
   });
   const [isLoading, setIsLoading] = useState(false);
+  const [product, setProduct] = useState<any>(null);
+  const [loadingProduct, setLoadingProduct] = useState(true);
+  const [currentOrder, setCurrentOrder] = useState<any>(null);
+  const [paymentUrl, setPaymentUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      // Aceita mensagens da EMIS ou do domínio Culonga
+      if (event.origin !== "https://cerpagamentonline.emis.co.ao" && event.origin !== "https://culonga.com") return;
+      
+      const { status } = event.data;
+      if (status === "SUCCESS" || status === "COMPLETED") {
+        handlePaymentComplete();
+      } else if (status === "REJECTED" || status === "ERROR") {
+        toast({
+          variant: "destructive",
+          title: "Pagamento não concluído",
+          description: "A transação foi rejeitada ou cancelada.",
+        });
+      }
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, [toast]);
+
+  useEffect(() => {
+    const fetchProduct = async () => {
+      if (!productId) return;
+      try {
+        const { data, error } = await supabase
+          .from('products')
+          .select(`
+            *,
+            profiles:producer_id (
+              full_name
+            )
+          `)
+          .eq('id', productId)
+          .single();
+
+        if (error) throw error;
+        setProduct(data);
+      } catch (error) {
+        console.error("Error fetching product:", error);
+        toast({
+          variant: "destructive",
+          title: "Erro ao carregar produto",
+          description: "Não foi possível encontrar o produto solicitado.",
+        });
+      } finally {
+        setLoadingProduct(false);
+      }
+    };
+
+    fetchProduct();
+  }, [productId, toast]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     
-    // TODO: Create order and get payment URL
-    // This would integrate with CulongaPay
-    
-    setTimeout(() => {
+    try {
+      // Create checkout session via Edge Function
+      const { data, error } = await supabase.functions.invoke('create-checkout-session', {
+        body: {
+          name: formData.name,
+          email: formData.email,
+          phone: formData.phone,
+          productId: product.id
+        }
+      });
+
+      if (error) throw error;
+      if (data.error) throw new Error(data.error); // Handle business logic error from function
+      if (!data.paymentUrl) throw new Error("Falha ao gerar URL de pagamento");
+
+      setPaymentUrl(data.paymentUrl);
+      setCurrentOrder({ id: data.orderId, reference: data.reference });
       setIsLoading(false);
       setStep('payment');
-    }, 1500);
+
+    } catch (error) {
+      console.error("Checkout error:", error);
+      toast({
+        variant: "destructive",
+        title: "Erro no checkout",
+        description: "Ocorreu um erro ao processar seu pedido. Tente novamente.",
+      });
+      setIsLoading(false);
+    }
   };
 
-  const handlePaymentComplete = () => {
-    // This would be triggered by webhook/callback
+  const handlePaymentComplete = async () => {
+    setIsLoading(true);
+    // O callback do backend processará a atualização do status
+    // Aqui apenas redirecionamos para o sucesso
     setStep('success');
+    setIsLoading(false);
   };
+
+  const formatPrice = (price: number) => {
+    return new Intl.NumberFormat('pt-AO', { style: 'currency', currency: 'AOA' }).format(price);
+  };
+
+  if (loadingProduct) {
+    return (
+      <div className="min-h-screen bg-secondary/30 flex items-center justify-center">
+        <p className="text-muted-foreground">Carregando produto...</p>
+      </div>
+    );
+  }
+
+  if (!product) {
+    return (
+      <div className="min-h-screen bg-secondary/30 flex items-center justify-center flex-col gap-4">
+        <p className="text-muted-foreground">Produto não encontrado.</p>
+        <Button asChild>
+          <Link to="/">Voltar ao início</Link>
+        </Button>
+      </div>
+    );
+  }
 
   if (step === 'success') {
     return (
@@ -74,12 +164,20 @@ const Checkout = () => {
             Obrigado pela sua compra! Enviamos os detalhes de acesso para o seu email.
           </p>
           <div className="bg-card rounded-2xl p-6 border border-border/50 shadow-card mb-8">
-            <div className="text-6xl mb-4">{mockProduct.image}</div>
-            <h2 className="font-display font-bold text-foreground mb-2">{mockProduct.name}</h2>
+            <div className="text-6xl mb-4 h-24 w-24 mx-auto flex items-center justify-center bg-accent/10 rounded-full overflow-hidden">
+                {product.image_url ? (
+                  <img src={product.image_url} alt={product.name} className="w-full h-full object-cover" />
+                ) : (
+                  <span>📦</span>
+                )}
+            </div>
+            <h2 className="font-display font-bold text-foreground mb-2">{product.name}</h2>
             <p className="text-sm text-muted-foreground">O seu acesso já está disponível!</p>
           </div>
-          <Button variant="accent" size="lg" className="w-full">
-            Acessar Conteúdo
+          <Button variant="accent" size="lg" className="w-full" asChild>
+            <a href={product.content_url} target="_blank" rel="noopener noreferrer">
+              Acessar Conteúdo
+            </a>
           </Button>
         </div>
       </div>
@@ -121,27 +219,31 @@ const Checkout = () => {
             <div className="lg:col-span-2">
               <div className="bg-card rounded-2xl border border-border/50 shadow-card overflow-hidden sticky top-8">
                 {/* Product Image */}
-                <div className="h-40 bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center text-6xl">
-                  {mockProduct.image}
+                <div className="h-40 bg-gradient-to-br from-primary/10 to-accent/10 flex items-center justify-center overflow-hidden">
+                  {product.image_url ? (
+                    <img src={product.image_url} alt={product.name} className="w-full h-full object-cover" />
+                  ) : (
+                    <span className="text-6xl">📦</span>
+                  )}
                 </div>
                 
                 <div className="p-6">
-                  <span className="text-sm text-muted-foreground">{mockProduct.producer}</span>
+                  <span className="text-sm text-muted-foreground">{product.profiles?.full_name}</span>
                   <h2 className="font-display text-xl font-bold text-foreground mt-1 mb-3">
-                    {mockProduct.name}
+                    {product.name}
                   </h2>
                   <p className="text-muted-foreground text-sm mb-6">
-                    {mockProduct.description}
+                    {product.description}
                   </p>
 
                   {/* Features */}
                   <div className="space-y-3 mb-6">
-                    {mockProduct.features.map((feature, index) => (
+                    {Array.isArray(product.features) && product.features.map((feature: any, index: number) => (
                       <div key={index} className="flex items-center gap-3 text-sm">
                         <div className="w-5 h-5 rounded-full bg-success/10 flex items-center justify-center flex-shrink-0">
                           <CheckCircle2 className="w-3 h-3 text-success" />
                         </div>
-                        <span className="text-muted-foreground">{feature}</span>
+                        <span className="text-muted-foreground">{String(feature)}</span>
                       </div>
                     ))}
                   </div>
@@ -151,7 +253,7 @@ const Checkout = () => {
                     <div className="flex items-center justify-between">
                       <span className="text-muted-foreground">Total a pagar</span>
                       <span className="font-display text-2xl font-bold text-foreground">
-                        {mockProduct.priceFormatted}
+                        {formatPrice(product.price)}
                       </span>
                     </div>
                   </div>
@@ -255,21 +357,28 @@ const Checkout = () => {
                       Complete o pagamento via Multicaixa Express
                     </p>
 
-                    {/* Payment iframe placeholder */}
-                    <div className="bg-secondary/50 rounded-xl p-8 text-center mb-6">
-                      <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
-                        <Lock className="w-8 h-8 text-primary" />
+                    {/* Payment iframe */}
+                    {paymentUrl ? (
+                      <div className="w-full aspect-[562/816] max-h-[700px] mb-6 rounded-xl overflow-hidden border border-border">
+                        <iframe 
+                          src={paymentUrl}
+                          width="100%" 
+                          height="100%" 
+                          frameBorder="0"
+                          title="Pagamento"
+                        />
                       </div>
-                      <p className="text-muted-foreground mb-4">
-                        Janela de pagamento CulongaPay
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        (Em produção, o iframe de pagamento aparecerá aqui)
-                      </p>
-                    </div>
+                    ) : (
+                      <div className="bg-secondary/50 rounded-xl p-8 text-center mb-6">
+                        <div className="w-16 h-16 rounded-full bg-primary/10 flex items-center justify-center mx-auto mb-4">
+                          <Lock className="w-8 h-8 text-primary" />
+                        </div>
+                         <p>Carregando pagamento...</p>
+                      </div>
+                    )}
 
-                    {/* Demo button to simulate payment */}
-                    <Button 
+                    {/* Button hidden in production if iframe works automatically, but kept for fallback or dev */}
+                    {/* <Button 
                       variant="success" 
                       size="lg" 
                       className="w-full"
@@ -277,7 +386,7 @@ const Checkout = () => {
                     >
                       <CheckCircle2 className="w-5 h-5 mr-2" />
                       Simular Pagamento Confirmado
-                    </Button>
+                    </Button> */}
 
                     <button 
                       onClick={() => setStep('form')}

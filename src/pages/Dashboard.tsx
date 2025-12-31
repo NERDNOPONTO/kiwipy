@@ -1,6 +1,7 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
+import { supabase } from "@/integrations/supabase/client";
 import { 
   Zap, 
   LayoutDashboard, 
@@ -29,15 +30,97 @@ const sidebarItems = [
   { icon: Settings, label: "Configurações", href: "/dashboard/settings", active: false },
 ];
 
-const recentSales = [
-  { id: 1, customer: "Maria Santos", email: "maria@email.com", product: "Curso de Marketing Digital", amount: "25.000 Kz", status: "Aprovado" },
-  { id: 2, customer: "João Paulo", email: "joao@email.com", product: "Ebook: Vendas Online", amount: "5.000 Kz", status: "Aprovado" },
-  { id: 3, customer: "Ana Ferreira", email: "ana@email.com", product: "Curso de Marketing Digital", amount: "25.000 Kz", status: "Pendente" },
-  { id: 4, customer: "Carlos Silva", email: "carlos@email.com", product: "Mentoria 1:1", amount: "150.000 Kz", status: "Aprovado" },
-];
-
 const Dashboard = () => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [userProfile, setUserProfile] = useState<any>(null);
+  const [userEmail, setUserEmail] = useState<string>("");
+  const [stats, setStats] = useState({
+    revenue: 0,
+    sales: 0,
+    customers: 0,
+    activeProducts: 0
+  });
+  const [recentSales, setRecentSales] = useState<any[]>([]);
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const checkUser = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session) {
+        setUserEmail(session.user.email || "");
+
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('user_id', session.user.id)
+          .single();
+      
+      if (profile) {
+        setUserProfile(profile);
+
+        // Fetch stats
+        const { data: orders } = await supabase
+          .from('orders')
+          .select('amount, status, customer_id')
+          .eq('producer_id', profile.id)
+          .eq('status', 'approved');
+        
+        const revenue = orders?.reduce((acc, order) => acc + order.amount, 0) || 0;
+        const salesCount = orders?.length || 0;
+        const uniqueCustomers = new Set(orders?.map(o => o.customer_id)).size;
+
+        const { count: productsCount } = await supabase
+          .from('products')
+          .select('*', { count: 'exact', head: true })
+          .eq('producer_id', profile.id)
+          .eq('is_active', true);
+
+        setStats({
+          revenue,
+          sales: salesCount,
+          customers: uniqueCustomers,
+          activeProducts: productsCount || 0
+        });
+
+        // Fetch recent sales
+        const { data: recent } = await supabase
+          .from('orders')
+          .select(`
+            id,
+            amount,
+            status,
+            created_at,
+            customers (
+              full_name,
+              email
+            ),
+            products (
+              name
+            )
+          `)
+          .eq('producer_id', profile.id)
+          .order('created_at', { ascending: false })
+          .limit(5);
+
+        if (recent) {
+          setRecentSales(recent);
+        }
+      }
+      }
+    };
+
+    checkUser();
+  }, [navigate]);
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    navigate("/auth");
+  };
+
+  const formatPrice = (price: number) => {
+    return new Intl.NumberFormat('pt-AO', { style: 'currency', currency: 'AOA' }).format(price);
+  };
 
   return (
     <div className="min-h-screen bg-secondary/30 flex">
@@ -78,21 +161,23 @@ const Dashboard = () => {
           <div className="p-4 border-t border-border/50">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-full bg-gradient-accent flex items-center justify-center text-accent-foreground font-bold flex-shrink-0">
-                P
+                {userProfile?.full_name?.charAt(0) || userEmail?.charAt(0) || "P"}
               </div>
               {isSidebarOpen && (
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-foreground truncate">Produtor Demo</div>
-                  <div className="text-sm text-muted-foreground truncate">demo@infopay.ao</div>
+                  <div className="font-medium text-foreground truncate">{userProfile?.full_name || "Usuário"}</div>
+                  <div className="text-sm text-muted-foreground truncate">{userEmail}</div>
                 </div>
               )}
             </div>
             {isSidebarOpen && (
-              <Button variant="ghost" className="w-full mt-4 justify-start text-muted-foreground" asChild>
-                <Link to="/">
-                  <LogOut className="w-4 h-4 mr-2" />
-                  Sair
-                </Link>
+              <Button 
+                variant="ghost" 
+                className="w-full mt-4 justify-start text-muted-foreground" 
+                onClick={handleLogout}
+              >
+                <LogOut className="w-4 h-4 mr-2" />
+                Sair
               </Button>
             )}
           </div>
@@ -156,10 +241,10 @@ const Dashboard = () => {
                 </div>
                 <div className="flex items-center gap-1 text-success text-sm font-medium">
                   <TrendingUp className="w-4 h-4" />
-                  +12.5%
+                  +0%
                 </div>
               </div>
-              <div className="font-display text-2xl font-bold text-foreground">2.450.000 Kz</div>
+              <div className="font-display text-2xl font-bold text-foreground">{formatPrice(stats.revenue)}</div>
               <div className="text-sm text-muted-foreground mt-1">Receita Total</div>
             </div>
 
@@ -170,10 +255,10 @@ const Dashboard = () => {
                 </div>
                 <div className="flex items-center gap-1 text-success text-sm font-medium">
                   <TrendingUp className="w-4 h-4" />
-                  +8.2%
+                  +0%
                 </div>
               </div>
-              <div className="font-display text-2xl font-bold text-foreground">348</div>
+              <div className="font-display text-2xl font-bold text-foreground">{stats.sales}</div>
               <div className="text-sm text-muted-foreground mt-1">Total de Vendas</div>
             </div>
 
@@ -184,10 +269,10 @@ const Dashboard = () => {
                 </div>
                 <div className="flex items-center gap-1 text-success text-sm font-medium">
                   <TrendingUp className="w-4 h-4" />
-                  +24.1%
+                  +0%
                 </div>
               </div>
-              <div className="font-display text-2xl font-bold text-foreground">1.284</div>
+              <div className="font-display text-2xl font-bold text-foreground">{stats.customers}</div>
               <div className="text-sm text-muted-foreground mt-1">Clientes</div>
             </div>
 
@@ -196,12 +281,12 @@ const Dashboard = () => {
                 <div className="w-12 h-12 rounded-xl bg-warning/10 flex items-center justify-center">
                   <Package className="w-6 h-6 text-warning" />
                 </div>
-                <div className="flex items-center gap-1 text-destructive text-sm font-medium">
+                <div className="flex items-center gap-1 text-muted-foreground text-sm font-medium">
                   <TrendingDown className="w-4 h-4" />
-                  -2.3%
+                  0%
                 </div>
               </div>
-              <div className="font-display text-2xl font-bold text-foreground">12</div>
+              <div className="font-display text-2xl font-bold text-foreground">{stats.activeProducts}</div>
               <div className="text-sm text-muted-foreground mt-1">Produtos Ativos</div>
             </div>
           </div>
@@ -237,23 +322,23 @@ const Dashboard = () => {
                       <td className="px-6 py-4">
                         <div className="flex items-center gap-3">
                           <div className="w-10 h-10 rounded-full bg-gradient-accent flex items-center justify-center text-accent-foreground font-medium text-sm">
-                            {sale.customer.charAt(0)}
+                            {sale.customers?.full_name?.charAt(0) || "C"}
                           </div>
                           <div>
-                            <div className="font-medium text-foreground">{sale.customer}</div>
-                            <div className="text-sm text-muted-foreground">{sale.email}</div>
+                            <div className="font-medium text-foreground">{sale.customers?.full_name || "Cliente"}</div>
+                            <div className="text-sm text-muted-foreground">{sale.customers?.email}</div>
                           </div>
                         </div>
                       </td>
-                      <td className="px-6 py-4 text-foreground">{sale.product}</td>
-                      <td className="px-6 py-4 font-medium text-foreground">{sale.amount}</td>
+                      <td className="px-6 py-4 text-foreground">{sale.products?.name}</td>
+                      <td className="px-6 py-4 font-medium text-foreground">{formatPrice(sale.amount)}</td>
                       <td className="px-6 py-4">
                         <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${
-                          sale.status === 'Aprovado' 
+                          sale.status === 'approved' 
                             ? 'bg-success/10 text-success' 
                             : 'bg-warning/10 text-warning'
                         }`}>
-                          {sale.status}
+                          {sale.status === 'approved' ? 'Aprovado' : 'Pendente'}
                         </span>
                       </td>
                       <td className="px-6 py-4">
@@ -263,6 +348,13 @@ const Dashboard = () => {
                       </td>
                     </tr>
                   ))}
+                  {recentSales.length === 0 && (
+                     <tr className="border-b border-border/30 last:border-0">
+                       <td colSpan={5} className="px-6 py-8 text-center text-muted-foreground">
+                         Nenhuma venda encontrada
+                       </td>
+                     </tr>
+                  )}
                 </tbody>
               </table>
             </div>
