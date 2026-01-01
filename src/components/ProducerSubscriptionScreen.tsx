@@ -23,6 +23,19 @@ export const ProducerSubscriptionScreen = ({ onSubscriptionComplete }: ProducerS
 
   useEffect(() => {
     loadDailyPlan();
+
+    const handleMessage = (event: MessageEvent) => {
+        if (event.data && event.data.type === 'payment_success') {
+            toast({
+                title: "Pagamento confirmado!",
+                description: "Sua assinatura foi ativada.",
+            });
+            onSubscriptionComplete();
+        }
+    };
+
+    window.addEventListener('message', handleMessage);
+    return () => window.removeEventListener('message', handleMessage);
   }, []);
 
   const loadDailyPlan = async () => {
