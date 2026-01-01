@@ -57,6 +57,74 @@ const ProductEditor = () => {
   const [imageUrl, setImageUrl] = useState("");
   const [contentUrl, setContentUrl] = useState("");
   const [hasSales, setHasSales] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [isUploadingContent, setIsUploadingContent] = useState(false);
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>, type: 'image' | 'content') => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    if (type === 'image' && !file.type.startsWith('image/')) {
+        toast({
+            title: "Erro no upload",
+            description: "Por favor, selecione uma imagem válida.",
+            variant: "destructive"
+        });
+        return;
+    }
+    
+    // Allow PDF for content
+    if (type === 'content' && file.type !== 'application/pdf') {
+         toast({
+            title: "Erro no upload",
+            description: "Por favor, selecione um arquivo PDF.",
+            variant: "destructive"
+        });
+        return;
+    }
+
+    try {
+        if (type === 'image') setIsUploadingImage(true);
+        else setIsUploadingContent(true);
+
+        const fileExt = file.name.split('.').pop();
+        const fileName = `${crypto.randomUUID()}.${fileExt}`;
+        const bucketName = type === 'image' ? 'product-images' : 'product-files';
+
+        const { error: uploadError } = await supabase.storage
+            .from(bucketName)
+            .upload(fileName, file);
+
+        if (uploadError) throw uploadError;
+
+        const { data } = supabase.storage
+            .from(bucketName)
+            .getPublicUrl(fileName);
+
+        if (type === 'image') {
+            setImageUrl(data.publicUrl);
+        } else {
+            setContentUrl(data.publicUrl);
+        }
+
+        toast({
+            title: "Upload concluído",
+            description: "Arquivo enviado com sucesso.",
+        });
+
+    } catch (error: any) {
+        console.error('Upload error:', error);
+        toast({
+            title: "Erro no upload",
+            description: error.message,
+            variant: "destructive"
+        });
+    } finally {
+        if (type === 'image') setIsUploadingImage(false);
+        else setIsUploadingContent(false);
+    }
+  };
 
   // Offers Management
   const [offers, setOffers] = useState<Offer[]>([]);
@@ -601,7 +669,7 @@ const ProductEditor = () => {
 
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
-                    <Label htmlFor="image">Imagem de Capa (URL)</Label>
+                    <Label htmlFor="image">Imagem de Capa</Label>
                     {hasSales && (
                       <TooltipProvider>
                         <Tooltip>
@@ -615,24 +683,59 @@ const ProductEditor = () => {
                       </TooltipProvider>
                     )}
                   </div>
-                  <Input 
-                    id="image" 
-                    value={imageUrl}
-                    onChange={(e) => setImageUrl(e.target.value)}
-                    placeholder="https://..."
-                    disabled={hasSales}
-                    className={hasSales ? "bg-muted" : ""}
-                  />
+                  
+                  <div className="flex gap-4 items-start">
+                    {imageUrl && (
+                        <div className="w-24 h-24 rounded border overflow-hidden shrink-0">
+                            <img src={imageUrl} alt="Capa" className="w-full h-full object-cover" />
+                        </div>
+                    )}
+                    <div className="flex-1 space-y-2">
+                        <div className="flex gap-2">
+                            <Input 
+                                id="image-upload" 
+                                type="file"
+                                accept="image/*"
+                                onChange={(e) => handleFileUpload(e, 'image')}
+                                disabled={hasSales || isUploadingImage}
+                                className="cursor-pointer"
+                            />
+                            {isUploadingImage && <Loader2 className="w-4 h-4 animate-spin my-auto" />}
+                        </div>
+                        <Input 
+                            id="image" 
+                            value={imageUrl}
+                            onChange={(e) => setImageUrl(e.target.value)}
+                            placeholder="Ou cole a URL da imagem..."
+                            disabled={hasSales}
+                            className={hasSales ? "bg-muted" : ""}
+                        />
+                    </div>
+                  </div>
                 </div>
                 
                 <div className="space-y-2">
-                  <Label htmlFor="content">Link do Conteúdo (URL)</Label>
+                  <Label htmlFor="content">Conteúdo do Produto (Arquivo PDF ou Link)</Label>
+                  <div className="flex gap-2">
+                     <Input 
+                        id="content-upload"
+                        type="file"
+                        accept="application/pdf"
+                        onChange={(e) => handleFileUpload(e, 'content')}
+                        disabled={isUploadingContent}
+                        className="cursor-pointer"
+                     />
+                     {isUploadingContent && <Loader2 className="w-4 h-4 animate-spin my-auto" />}
+                  </div>
                   <Input 
                     id="content" 
                     value={contentUrl}
                     onChange={(e) => setContentUrl(e.target.value)}
-                    placeholder="Link para download ou área de membros"
+                    placeholder="Ou cole o link para download ou área de membros"
                   />
+                  <p className="text-xs text-muted-foreground">
+                    Faça upload do arquivo PDF ou insira um link externo.
+                  </p>
                 </div>
               </CardContent>
             </Card>

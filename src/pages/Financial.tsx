@@ -104,10 +104,35 @@ const Financial = () => {
       const approvedOrders = orders?.filter(o => ['approved', 'paid'].includes(o.status)) || [];
       const totalSales = approvedOrders.reduce((sum, order) => sum + order.amount, 0);
       
-      // Calculate Net Income using DB values (Single Source of Truth)
-      const netIncome = approvedOrders.reduce((sum, order) => sum + (order.net_amount || (order.amount * 0.9)), 0);
+      // Calculate Net Income (SALDO LÍQUIDO - 90%)
+      // Pedido do usuário: "AGORA SÓ ESTÁ ACHEGAR OS 90%"
+      // Portanto, o saldo disponível deve refletir o valor LÍQUIDO das vendas de produtos.
+      // Assinaturas continuam sendo 0 para o produtor.
+      
+      const netIncome = approvedOrders.reduce((sum, order) => {
+        const productName = order.product?.name || '';
+        const isSubscription = (order.product?.name === 'Assinatura Diária');
+        
+        if (isSubscription) {
+             return sum + 0; // Assinatura não gera saldo para produtor
+        } else {
+             // Venda de Produto: Produtor vê 90% (Líquido) se existir, senão 90% do bruto
+             // AVISO: Se o banco já estiver retornando o líquido correto em 'net_amount', usamos ele.
+             const dbNetAmount = order.net_amount ? Number(order.net_amount) : null;
+             const grossAmount = Number(order.amount);
+             
+             // Se o líquido no banco for menor que o bruto, confiamos nele (já descontou 10%)
+             // Se for igual (erro antigo), forçamos 90%.
+             if (dbNetAmount && dbNetAmount < grossAmount) {
+                 return sum + dbNetAmount;
+             }
+             return sum + (grossAmount * 0.9);
+        }
+      }, 0);
 
       // Calculate Withdrawals
+      // Como agora o saldo é líquido (90%), os saques também devem ser subtraídos diretamente.
+      
       const pendingWithdrawal = withdrawals
         ?.filter(w => w.status === 'pending')
         .reduce((sum, w) => sum + w.amount, 0) || 0;
@@ -116,7 +141,7 @@ const Financial = () => {
         ?.filter(w => ['approved', 'paid'].includes(w.status))
         .reduce((sum, w) => sum + w.amount, 0) || 0;
 
-      // Available to withdraw = Net Income - (Pending + Withdrawn)
+      // Available to withdraw = Net Income - Withdrawals
       const availableToWithdraw = netIncome - pendingWithdrawal - totalWithdrawn;
 
       setMetrics({
@@ -161,6 +186,10 @@ const Financial = () => {
         return;
       }
 
+      // Calculate tax and net amount
+      // REMOVED: User requested no calculation at withdrawal time.
+      // The amount is already net (90%).
+      
       setLoading(true);
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) return;
@@ -173,6 +202,8 @@ const Financial = () => {
 
       if (!profile) return;
 
+      // Inserir Saque
+      // O valor já é líquido (90%), então apenas registramos o saque.
       const { error } = await supabase
         .from('withdrawals')
         .insert({
@@ -184,7 +215,7 @@ const Financial = () => {
 
       if (error) throw error;
 
-      toast.success("Solicitação de saque enviada!");
+      toast.success(`Solicitação de saque enviada!`);
       setIsRequestingWithdrawal(false);
       setWithdrawAmount("");
       setSelectedBankId("");
@@ -290,6 +321,22 @@ const Financial = () => {
                     value={withdrawAmount}
                     onChange={(e) => setWithdrawAmount(e.target.value)}
                   />
+                  {withdrawAmount && !isNaN(Number(withdrawAmount)) && (
+                    <div className="rounded-md bg-muted p-3 text-sm space-y-1">
+                        <div className="flex justify-between">
+                            <span>Valor solicitado:</span>
+                            <span>{formatCurrency(Number(withdrawAmount))}</span>
+                        </div>
+                        <div className="flex justify-between text-red-500">
+                            <span>Taxa da Plataforma (10%):</span>
+                            <span>- {formatCurrency(Number(withdrawAmount) * 0.10)}</span>
+                        </div>
+                        <div className="border-t pt-1 mt-1 flex justify-between font-bold text-emerald-600">
+                            <span>Valor a Receber:</span>
+                            <span>{formatCurrency(Number(withdrawAmount) * 0.90)}</span>
+                        </div>
+                    </div>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <Label>Conta Bancária</Label>

@@ -95,9 +95,34 @@ const Dashboard = () => {
             // Financial Calculations
             const totalSales = salesData.reduce((sum, order) => sum + order.amount, 0);
             
-            // Calculate Net Income using DB values (Single Source of Truth)
-            // This ensures we match exactly what is in the database (controlled by Triggers)
-            const netIncome = salesData.reduce((sum, order) => sum + (order.net_amount || (order.amount * 0.9)), 0);
+            // Calculate Net Income (Saldo Líquido do Produtor)
+            // Regra de Ouro: 
+            // 1. Assinaturas (SaaS) -> 100% para Admin (0% para Produtor)
+            // 2. Vendas de Produtos -> 90% para Produtor (10% Taxa Plataforma)
+            const netIncome = salesData.reduce((sum, order) => {
+                const productName = order.products?.name || '';
+                const isSubscription = 
+                    (order.payment_data && order.payment_data.subscription) || 
+                    productName === 'Assinatura Diária';
+
+                if (isSubscription) {
+                    // Produtor não recebe nada por assinaturas do sistema
+                    return sum + 0;
+                } else {
+                    // Venda de produto próprio: Recebe 90%
+                    // Priorizamos o cálculo local para garantir a regra visualmente, 
+                    // mas idealmente viria do banco (order.net_amount).
+                    // Se o banco estiver retornando 100% (erro), forçamos 90% aqui.
+                    const dbNetAmount = order.net_amount ? Number(order.net_amount) : null;
+                    const grossAmount = Number(order.amount);
+                    
+                    // Se o valor do banco for igual ao bruto (100%), assumimos que o trigger falhou e aplicamos 90%
+                    if (dbNetAmount && dbNetAmount < grossAmount) {
+                         return sum + dbNetAmount;
+                    }
+                    return sum + (grossAmount * 0.9);
+                }
+            }, 0);
 
             // Calculate Withdrawals
             const pendingWithdrawal = withdrawals

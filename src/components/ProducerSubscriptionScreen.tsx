@@ -80,16 +80,24 @@ export const ProducerSubscriptionScreen = ({ onSubscriptionComplete }: ProducerS
           email: session.user.email,
           name: profile.full_name || session.user.email,
           phone: profile.phone,
-          userId: session.user.id
+          userId: profile.id // USAR PROFILE.ID (FK Correta), não session.user.id
         }
       });
 
       if (checkoutError) throw checkoutError;
       
-      if (checkoutData?.url) {
-        setPaymentUrl(checkoutData.url);
+      if (checkoutData?.error) {
+        // Detecção de versão desatualizada do backend
+        if (checkoutData.error === "Dados incompletos: productId e email são obrigatórios") {
+          throw new Error("O servidor de pagamentos está desatualizado. Execute 'supabase functions deploy create-checkout-session'.");
+        }
+        throw new Error(checkoutData.error);
+      }
+
+      if (checkoutData?.paymentUrl) {
+        setPaymentUrl(checkoutData.paymentUrl);
       } else {
-        throw new Error("URL de pagamento não retornada");
+        throw new Error("URL de pagamento não retornada pelo servidor");
       }
 
     } catch (error) {

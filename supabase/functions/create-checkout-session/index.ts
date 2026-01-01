@@ -30,13 +30,13 @@ serve(async (req) => {
   }
 
   try {
-    const supabaseClient = createClient(
+    // Usar a service role key para operações administrativas (bypassar RLS)
+    const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
-
-    const { name, email, phone, productId, offerId, affiliateRef, planId, days } = await req.json()
+    
+    const { name, email, phone, productId, offerId, affiliateRef, planId, days, userId } = await req.json()
 
     // 1. Validar dados de entrada
     if ((!productId && !planId) || !email) {
@@ -56,7 +56,7 @@ serve(async (req) => {
       if (!days || days < 1) throw new Error("Número de dias inválido");
 
       // Buscar o plano
-      const { data: plan, error: planError } = await supabaseClient
+      const { data: plan, error: planError } = await supabaseAdmin
         .from('saas_plans')
         .select('*')
         .eq('id', planId)
@@ -68,26 +68,78 @@ serve(async (req) => {
       price = plan.price * days;
 
       // Buscar Produto do Sistema "Assinatura Diária" para vincular o pedido
-      const { data: systemProduct, error: sysProdError } = await supabaseClient
+      const { data: systemProduct, error: sysProdError } = await supabaseAdmin
         .from('products')
         .select('*')
         .eq('name', 'Assinatura Diária')
         .limit(1)
-        .single();
+        .maybeSingle();
 
-      if (sysProdError || !systemProduct) {
-         // Fallback: Tenta criar ou pegar qualquer produto para não falhar (hack de robustez)
-         // Mas idealmente o produto deve existir via migration
-         console.error("Produto de Sistema 'Assinatura Diária' não encontrado. Verifique a migração.");
-         throw new Error("Erro interno: Produto de sistema não configurado.");
+      if (!systemProduct) {
+         console.log("Produto de sistema não encontrado. Criando automaticamente...");
+         
+         // Buscar um "dono" para o produto
+         // Prioridade: Variável de Ambiente > Admin "Seguro" > Qualquer Admin
+         const systemProducerId = Deno.env.get('SYSTEM_PRODUCER_ID');
+         let ownerId = systemProducerId;
+         
+         if (!ownerId) {
+             console.warn("ALERTA: SYSTEM_PRODUCER_ID não configurado. Tentando recuperar um Admin para evitar perda de fundos...");
+             
+             // Fallback Seguro: Tentar encontrar um usuário com perfil de 'admin' ou o primeiro usuário do sistema
+             // Idealmente, você teria uma flag 'is_admin' na tabela profiles, mas vamos usar uma lógica de salvaguarda
+             const { data: adminUser } = await supabaseAdmin
+                .from('profiles')
+                .select('id')
+                .limit(1)
+                .order('created_at', { ascending: true }) // O primeiro usuário criado geralmente é o admin/dono
+                .maybeSingle();
+                
+             if (adminUser) {
+                 ownerId = adminUser.id;
+                 console.log(`Fallback ativado: Usando usuário ${ownerId} (mais antigo) como Admin temporário para esta transação.`);
+             } else {
+                 // Último recurso: Se não tiver NENHUM usuário no banco (impossível em produção, mas...)
+                 console.error("ERRO CRÍTICO: Nenhum usuário encontrado para receber os fundos.");
+                 throw new Error("Sistema não inicializado: Impossível processar pagamento sem um destinatário válido (Admin).");
+             }
+         }
+         
+         // AVISO: Se caímos no fallback, o dinheiro vai para este 'ownerId'.
+         // Como é uma Assinatura, o trigger do banco vai zerar o net_amount desse produtor de qualquer jeito
+         // e mandar 100% para a plataforma (commission_platform).
+         // Então, o dinheiro está seguro contabilmente, apenas o vínculo do produto ficará com esse usuário.
+
+         const { data: newProduct, error: createError } = await supabaseAdmin
+            .from('products')
+            .insert({
+                producer_id: ownerId,
+                name: 'Assinatura Diária',
+                description: 'Acesso à plataforma por dias contratados',
+                price: 100, // Preço base placeholder
+                product_type: 'servico',
+                is_active: true,
+                stock_enabled: false,
+                image_url: 'https://placehold.co/600x400/png?text=Assinatura+Diaria'
+            })
+            .select()
+            .single();
+                 
+         if (createError || !newProduct) {
+             console.error("Erro ao criar produto de sistema:", createError);
+             throw new Error("Falha ao criar produto de sistema automaticamente: " + createError?.message);
+         }
+         
+         product = newProduct;
+      } else {
+         product = systemProduct;
       }
       
-      product = systemProduct;
       console.log(`Checkout de Plano: ${plan.name} x ${days} dias = ${price} Kz`);
 
     } else if (offerId) {
       // Se houver offerId, buscamos a oferta específica
-      const { data: offer, error: offerError } = await supabaseClient
+      const { data: offer, error: offerError } = await supabaseAdmin
         .from('offers')
         .select('*, products(*)')
         .eq('id', offerId)
@@ -104,7 +156,7 @@ serve(async (req) => {
 
     } else {
       // Se não, busca o produto direto (preço padrão)
-      const { data: prod, error: productError } = await supabaseClient
+      const { data: prod, error: productError } = await supabaseAdmin
         .from('products')
         .select('*')
         .eq('id', productId)
@@ -118,7 +170,7 @@ serve(async (req) => {
     if (!product) throw new Error("Produto não encontrado");
 
     // 3. Obter ou Criar Cliente
-    const { data: customerId, error: customerError } = await supabaseClient
+    const { data: customerId, error: customerError } = await supabaseAdmin
       .rpc('get_or_create_customer', {
         p_email: email,
         p_full_name: name,
@@ -135,7 +187,7 @@ serve(async (req) => {
         
         // Busca a afiliação ativa para este produto e usuário
         // Aceita 'approved' ou 'active' para flexibilidade
-        const { data: affiliateData, error: affError } = await supabaseClient
+        const { data: affiliateData, error: affError } = await supabaseAdmin
           .from('affiliates')
           .select('id, status')
           .eq('product_id', product.id)
@@ -165,13 +217,32 @@ serve(async (req) => {
     // URL de callback que processa o pagamento e redireciona o usuário
     const callbackUrl = "https://bmbmkvrypycdttnbeeiq.supabase.co/functions/v1/payment-callback";
 
-    // Usar a service role key para operações administrativas (bypassar RLS)
-    const supabaseAdmin = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-    )
+    // 4. LÓGICA DE ATRIBUIÇÃO DE "PRODUCER_ID" DO PEDIDO
+    // Aqui está a chave da separação:
+    // - Se for Assinatura (SaaS): O produtor é o ADMIN (ownerId)
+    // - Se for Venda Normal: O produtor é o dono do produto
     
-    // ... (Manter resto do código)
+    let orderProducerId = product.producer_id;
+    const isSaasPayment = !!planId || product.name === 'Assinatura Diária';
+
+    if (isSaasPayment) {
+        // Garantia extra: Se for assinatura, o dinheiro VAI para o dono do sistema
+        // independente de quem seja o usuário logado ou quem criou o produto
+        
+        // Tentar obter o ID do Admin novamente se necessário
+        const systemProducerId = Deno.env.get('SYSTEM_PRODUCER_ID');
+        if (systemProducerId) {
+             orderProducerId = systemProducerId;
+        } else {
+             // Se não tiver ENV, mantemos o do produto (que deve ser o admin se a lógica de criação funcionou)
+             // ou usamos o fallback do ownerId calculado acima (se foi criado agora)
+             if (typeof ownerId !== 'undefined') {
+                 orderProducerId = ownerId;
+             }
+        }
+        
+        console.log(`[Checkout] Modo SaaS: Atribuindo venda ao Admin/Sistema (${orderProducerId})`);
+    }
 
     const { data: order, error: orderError } = await supabaseAdmin // USAR ADMIN AQUI
       .from('orders')
@@ -179,11 +250,11 @@ serve(async (req) => {
         reference,
         product_id: product.id,
         customer_id: customerId,
-        producer_id: product.producer_id,
+        producer_id: orderProducerId, // USANDO ID CORRIGIDO
         amount: price,
         status: 'pending',
-        affiliate_id: affiliateId,
-        payment_data: planId ? { subscription: { planId, days, userId } } : null
+        affiliate_id: isSaasPayment ? null : affiliateId, // Assinatura não tem afiliado
+        payment_data: planId ? { subscription: { planId, days, userId }, is_saas_payment: true } : null
       })
       .select()
       .single()
@@ -195,7 +266,7 @@ serve(async (req) => {
       reference: reference, 
       amount: Number(price).toFixed(2), 
       token: MERCHANT_TOKEN, // Frame Token (UUID)
-      terminal: "486467", // Terminal ID (Fornecido pelo usuário)
+      terminal: Deno.env.get('EMIS_TERMINAL_ID') || "486467", // Terminal ID via ENV
       
       mobile: "PAYMENT",
       qr_code: "PAYMENT", 

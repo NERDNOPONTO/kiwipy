@@ -32,37 +32,46 @@ const AdminDashboard = () => {
         totalSales = orders.reduce((sum, order) => sum + order.amount, 0);
       }
 
-      const producerShare = totalSales * 0.90;
-      const companyShare = totalSales * 0.10;
-
-      // 2. Calculate SaaS Revenue (Simplified: Sum of prices of active subscriptions)
-      // Ideally this should come from a payments table, but we'll use active MRR for now
-      const { data: subscriptions, error: subError } = await supabase
-        .from('saas_subscriptions')
-        .select(`
-          status,
-          plan:saas_plans(price)
-        `)
-        .eq('status', 'active');
+      // 2. Calculate SaaS Revenue (Real payments from Orders)
+      // Sum orders that are subscriptions (identified by payment_data->subscription OR product name 'Assinatura Diária')
+      const { data: saasOrders } = await supabase
+        .from('orders')
+        .select('amount, payment_data, products!inner(name)')
+        .eq('status', 'approved');
       
-      let saasMRR = 0;
-      if (subscriptions) {
-        // @ts-ignore
-        saasMRR = subscriptions.reduce((sum, sub) => sum + (sub.plan?.price || 0), 0);
+      let totalSaaS = 0;
+      if (saasOrders) {
+        totalSaaS = saasOrders.reduce((sum, o) => {
+          const isSub = (o.payment_data && (o.payment_data as any).subscription) || 
+                        (o.products && (o.products as any).name === 'Assinatura Diária');
+          return isSub ? sum + o.amount : sum;
+        }, 0);
       }
+      
+      // Recalculate sales splits excluding SaaS orders
+      const totalRevenue = totalSales; // This includes SaaS if they are in orders table
+      const realProductSales = totalRevenue - totalSaaS;
+      
+      const producerShare = realProductSales * 0.90;
+      const companyShare = (realProductSales * 0.10); // 10% of products ONLY (SaaS is separate)
 
-      // 3. Count Producers
+      // 3. Count Producers & Active Subscriptions
       const { count: producerCount } = await supabase
         .from('profiles')
         .select('*', { count: 'exact', head: true })
         .eq('role', 'producer');
 
+      const { count: subscriptionCount } = await supabase
+        .from('saas_subscriptions')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'active');
+
       setMetrics({
         totalProducerBalance: producerShare,
-        totalCompanyBalance: companyShare,
-        totalSaaSRevenue: saasMRR,
+        totalCompanyBalance: companyShare, // 10% sobre vendas (revertido para evitar confusão no saque)
+        totalSaaSRevenue: totalSaaS,
         activeProducers: producerCount || 0,
-        activeSubscriptions: subscriptions?.length || 0
+        activeSubscriptions: subscriptionCount || 0
       });
 
     } catch (error) {
