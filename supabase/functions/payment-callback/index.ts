@@ -128,15 +128,49 @@ serve(async (req) => {
     
     // Só atualizar se tivermos um novo status definido e ele for diferente do atual (ou se for approved e ainda não estiver approved)
     if (newStatus && order.status !== 'approved') {
+      const currentPaymentData = (order.payment_data as any) || {};
       const updateData: any = {
         status: newStatus,
-        payment_data: payload,
+        payment_data: { ...currentPaymentData, ...payload }, // Merge para preservar metadados (ex: subscription)
         updated_at: new Date().toISOString()
       };
       
       if (newStatus === 'approved') {
         updateData.access_granted_at = new Date().toISOString();
         updateData.payment_reference = transactionId;
+
+        // --- LÓGICA DE ATIVAÇÃO DE ASSINATURA ---
+        if (currentPaymentData.subscription) {
+          const { planId, days, userId } = currentPaymentData.subscription;
+          console.log(`[Payment Callback] Ativando assinatura para usuário ${userId}, plano ${planId}, ${days} dias.`);
+
+          if (userId && planId && days) {
+             const endDate = new Date();
+             endDate.setDate(endDate.getDate() + Number(days));
+             
+             // Inserir ou atualizar assinatura
+             // Nota: Se o usuário já tiver uma assinatura, talvez devêssemos estender?
+             // Por simplificação, vamos criar uma nova 'active' que sobrepõe.
+             // Ou melhor, insert.
+             
+             const { error: subError } = await supabaseClient
+               .from('saas_subscriptions')
+               .insert({
+                 user_id: userId,
+                 plan_id: planId,
+                 status: 'active',
+                 current_period_start: new Date().toISOString(),
+                 current_period_end: endDate.toISOString()
+               });
+
+             if (subError) {
+               console.error("[Payment Callback] Erro ao ativar assinatura:", subError);
+             } else {
+               console.log("[Payment Callback] Assinatura ativada com sucesso!");
+             }
+          }
+        }
+        // ----------------------------------------
       }
 
       const { error: updateError } = await supabaseClient
@@ -148,6 +182,79 @@ serve(async (req) => {
 
       // 4. Liberar acesso (se aprovado)
       if (newStatus === 'approved') {
+        // PROCESSAMENTO DE COMISSÃO DE AFILIADO
+        if (order.affiliate_id) {
+          try {
+            console.log(`Processando comissão para afiliado: ${order.affiliate_id}`);
+            
+            // Buscar dados da afiliação e do produto para saber a taxa
+            const { data: affiliateData } = await supabaseClient
+              .from('affiliates')
+              .select(`
+                id, 
+                user_id,
+                custom_commission_rate, 
+                products:product_id (commission_rate)
+              `)
+              .eq('id', order.affiliate_id)
+              .single();
+
+            if (affiliateData) {
+              // Determinar taxa: customizada > produto > 0
+              // Nota: Typescript pode reclamar de products ser array ou objeto, mas no single() é objeto.
+              // Ajuste conforme o retorno real do supabase-js
+              const productRate = (affiliateData.products as any)?.commission_rate || 0;
+              const rate = affiliateData.custom_commission_rate ?? productRate;
+              
+              if (rate > 0) {
+                const commissionAmount = (order.amount * rate) / 100;
+                
+                // 1. Registrar Payout (Comissão)
+                const { error: payoutError } = await supabaseClient
+                  .from('payouts')
+                  .insert({
+                    affiliate_id: order.affiliate_id,
+                    amount: commissionAmount,
+                    status: 'pending', // Disponível para saque (ou fluxo de aprovação automática)
+                    method: 'system_split'
+                  });
+                
+                if (payoutError) console.error("Erro ao criar payout:", payoutError);
+                else {
+                  console.log(`Comissão de ${commissionAmount} registrada para afiliado ${order.affiliate_id}`);
+                  
+                  // 2. Atualizar estatísticas do afiliado (Incremento manual para evitar RPC complexo agora)
+                  const { data: currentStats } = await supabaseClient
+                    .from('affiliates')
+                    .select('sales_count, total_commission_earned')
+                    .eq('id', order.affiliate_id)
+                    .single();
+                  
+                  if (currentStats) {
+                    await supabaseClient
+                      .from('affiliates')
+                      .update({
+                        sales_count: (currentStats.sales_count || 0) + 1,
+                        total_commission_earned: (currentStats.total_commission_earned || 0) + commissionAmount,
+                        updated_at: new Date().toISOString()
+                      })
+                      .eq('id', order.affiliate_id);
+                  }
+
+                  // 3. Atualizar pedido com o valor da comissão
+                  await supabaseClient
+                    .from('orders')
+                    .update({ commission_amount: commissionAmount })
+                    .eq('id', order.id);
+                }
+              }
+            }
+          } catch (commError) {
+            console.error("Erro ao processar comissão:", commError);
+            // Não falhar o callback inteiro por erro de comissão, apenas logar
+          }
+        }
+
         // Verificar se já existe acesso
         const { data: existingAccess } = await supabaseClient
           .from('product_access')

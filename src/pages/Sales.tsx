@@ -1,180 +1,196 @@
 import { useState, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { supabase } from "@/integrations/supabase/client";
 import DashboardLayout from "@/components/DashboardLayout";
-import { 
-  Search,
-  MoreHorizontal,
-  Download,
-  Filter
-} from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Download, RefreshCw } from "lucide-react";
+import { SalesMetrics } from "@/components/sales/SalesMetrics";
+import { SalesChart } from "@/components/sales/SalesChart";
+import { TransactionsTable } from "@/components/sales/TransactionsTable";
+import { ProductPerformance } from "@/components/sales/ProductPerformance";
+import { PaymentMethodStats } from "@/components/sales/PaymentMethodStats";
 
 const Sales = () => {
-  const [searchTerm, setSearchTerm] = useState("");
   const [sales, setSales] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    const fetchSales = async () => {
-      try {
-        const { data: { session } } = await supabase.auth.getSession();
-        
-        if (session) {
-          // Fetch Profile
-          const { data: profile } = await supabase
-            .from('profiles')
-            .select('*')
-            .eq('user_id', session.user.id)
-            .single();
-        
-          if (profile) {
-            // Fetch All Orders for this producer
-            const { data: orders, error } = await supabase
-              .from('orders')
-              .select(`
+  const fetchSales = async () => {
+    setIsLoading(true);
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (session) {
+        // Fetch Profile
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('*')
+          .eq('user_id', session.user.id)
+          .single();
+      
+        if (profile) {
+          // Fetch All Orders for this producer
+          const { data: orders, error } = await supabase
+            .from('orders')
+            .select(`
+              id,
+              amount,
+              status,
+              created_at,
+              payment_data,
+              product_id,
+              customers (
+                full_name,
+                email
+              ),
+              products (
                 id,
-                amount,
-                status,
-                created_at,
-                customers (
-                  full_name,
-                  email
-                ),
-                products (
-                  name
-                )
-              `)
-              .eq('producer_id', profile.id)
-              .order('created_at', { ascending: false });
+                name,
+                image_url
+              )
+            `)
+            .eq('producer_id', profile.id)
+            .order('created_at', { ascending: false });
 
-            if (error) throw error;
-            setSales(orders || []);
-          }
+          if (error) throw error;
+          setSales(orders || []);
         }
-      } catch (error) {
-        console.error("Error fetching sales:", error);
-      } finally {
-        setIsLoading(false);
       }
-    };
+    } catch (error) {
+      console.error("Error fetching sales:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
+  useEffect(() => {
     fetchSales();
+
+    // Real-time subscription for new orders
+    const channel = supabase
+      .channel('schema-db-changes')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'orders'
+        },
+        () => {
+          fetchSales();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [navigate]);
 
-  const filteredSales = sales.filter(sale =>
-    sale.customers?.full_name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    sale.customers?.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    sale.products?.name?.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const handleExport = () => {
+    const headers = ["ID", "Data", "Cliente", "Email", "Produto", "Valor", "Status", "Método"];
+    const csvContent = [
+      headers.join(","),
+      ...sales.map(sale => [
+        sale.id,
+        new Date(sale.created_at).toLocaleDateString('pt-AO'),
+        `"${sale.customers?.full_name || ''}"`,
+        sale.customers?.email,
+        `"${sale.products?.name || ''}"`,
+        sale.amount,
+        sale.status,
+        sale.payment_data?.paymentMethod || ''
+      ].join(","))
+    ].join("\n");
 
-  const formatPrice = (price: number) => {
-    return new Intl.NumberFormat('pt-AO', { style: 'currency', currency: 'AOA' }).format(price);
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    if (link.download !== undefined) {
+      const url = URL.createObjectURL(blob);
+      link.setAttribute("href", url);
+      link.setAttribute("download", `vendas_infopay_${new Date().toISOString().split('T')[0]}.csv`);
+      link.style.visibility = 'hidden';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
   };
 
   return (
     <DashboardLayout>
-      <div className="p-8 space-y-8 animate-fade-in">
+      <div className="p-8 space-y-8 animate-fade-in max-w-[1600px] mx-auto">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
-            <h1 className="font-display text-3xl font-bold text-foreground">Vendas</h1>
-            <p className="text-muted-foreground mt-1">Acompanhe suas vendas e recebimentos</p>
+            <h1 className="font-display text-3xl font-bold text-foreground">Dashboard de Vendas</h1>
+            <p className="text-muted-foreground mt-1">Visão completa do seu negócio e processamento de pagamentos</p>
           </div>
-          <Button variant="outline">
-            <Download className="w-4 h-4 mr-2" />
-            Exportar CSV
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={fetchSales} disabled={isLoading}>
+              <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+              Atualizar
+            </Button>
+            <Button variant="default" onClick={handleExport}>
+              <Download className="w-4 h-4 mr-2" />
+              Relatório Completo
+            </Button>
+          </div>
         </div>
 
-        {/* Filters */}
-        <div className="flex items-center gap-4 bg-card p-4 rounded-xl border border-border/50">
-          <div className="relative flex-1">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input 
-              type="text" 
-              placeholder="Pesquisar por cliente, email ou produto..." 
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-10 bg-secondary border-0"
-            />
-          </div>
-          <Button variant="ghost" size="icon">
-             <Filter className="w-4 h-4" />
-          </Button>
-        </div>
+        <Tabs defaultValue="overview" className="space-y-6">
+          <TabsList className="bg-card border p-1 h-auto">
+            <TabsTrigger value="overview" className="px-4 py-2">Visão Geral</TabsTrigger>
+            <TabsTrigger value="transactions" className="px-4 py-2">Transações</TabsTrigger>
+            <TabsTrigger value="products" className="px-4 py-2">Produtos</TabsTrigger>
+            <TabsTrigger value="analytics" className="px-4 py-2">Analytics & Funil</TabsTrigger>
+          </TabsList>
 
-        {/* Sales List */}
-        <div className="bg-card rounded-2xl border border-border/50 shadow-sm overflow-hidden">
-          {isLoading ? (
-             <div className="p-12 text-center text-muted-foreground">Carregando vendas...</div>
-          ) : (
-            <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-secondary/50">
-                <tr>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Cliente</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Produto</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Valor</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Data</th>
-                  <th className="px-6 py-4 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/50">
-                {filteredSales.map((sale) => (
-                  <tr key={sale.id} className="hover:bg-secondary/20 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-accent flex items-center justify-center text-xs font-bold text-accent-foreground">
-                          {sale.customers?.full_name?.charAt(0) || "C"}
-                        </div>
-                        <div>
-                          <div className="text-sm font-medium text-foreground">{sale.customers?.full_name || "Cliente"}</div>
-                          <div className="text-xs text-muted-foreground">{sale.customers?.email}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-foreground">
-                      {sale.products?.name}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-foreground">
-                      {formatPrice(sale.amount)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        sale.status === 'approved' 
-                          ? 'bg-success/10 text-success' 
-                          : sale.status === 'pending'
-                          ? 'bg-yellow-500/10 text-yellow-500'
-                          : 'bg-destructive/10 text-destructive'
-                      }`}>
-                        {sale.status === 'approved' ? 'Aprovado' : sale.status === 'pending' ? 'Pendente' : 'Rejeitado'}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-muted-foreground">
-                      {new Date(sale.created_at).toLocaleDateString('pt-AO')}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <button className="text-muted-foreground hover:text-foreground">
-                        <MoreHorizontal className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {filteredSales.length === 0 && (
-                   <tr>
-                    <td colSpan={6} className="px-6 py-12 text-center text-muted-foreground">
-                      Nenhuma venda encontrada.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-          )}
-        </div>
+          <TabsContent value="overview" className="space-y-6 focus-visible:ring-0">
+             <SalesMetrics orders={sales} isLoading={isLoading} />
+             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+               <div className="lg:col-span-2">
+                 <SalesChart orders={sales} isLoading={isLoading} />
+               </div>
+               <div className="lg:col-span-1">
+                 <PaymentMethodStats orders={sales} />
+               </div>
+             </div>
+          </TabsContent>
+          
+          <TabsContent value="transactions" className="focus-visible:ring-0">
+             <TransactionsTable orders={sales} isLoading={isLoading} />
+          </TabsContent>
+
+          <TabsContent value="products" className="focus-visible:ring-0">
+             <ProductPerformance orders={sales} />
+          </TabsContent>
+
+          <TabsContent value="analytics" className="focus-visible:ring-0">
+             <div className="grid gap-6 md:grid-cols-2">
+               <div className="p-8 border rounded-xl bg-card flex flex-col items-center justify-center text-center min-h-[300px]">
+                  <div className="w-16 h-16 bg-secondary rounded-full flex items-center justify-center mb-4 text-3xl">🗺️</div>
+                  <h3 className="font-medium text-lg mb-2">Análise Geográfica</h3>
+                  <p className="text-muted-foreground max-w-sm">
+                    Visualize de onde vêm seus clientes. O mapa interativo e lista de cidades estarão disponíveis em breve.
+                  </p>
+               </div>
+               <div className="p-8 border rounded-xl bg-card flex flex-col items-center justify-center text-center min-h-[300px]">
+                  <div className="w-16 h-16 bg-secondary rounded-full flex items-center justify-center mb-4 text-3xl">📊</div>
+                  <h3 className="font-medium text-lg mb-2">Funil de Vendas</h3>
+                  <p className="text-muted-foreground max-w-sm">
+                    Acompanhe a conversão de visitantes para clientes. Integração com dados de tráfego em desenvolvimento.
+                  </p>
+               </div>
+               <div className="p-8 border rounded-xl bg-card flex flex-col items-center justify-center text-center min-h-[300px] md:col-span-2">
+                  <div className="w-16 h-16 bg-secondary rounded-full flex items-center justify-center mb-4 text-3xl">🤖</div>
+                  <h3 className="font-medium text-lg mb-2">Insights Automáticos com IA</h3>
+                  <p className="text-muted-foreground max-w-sm">
+                    Nosso sistema de inteligência artificial analisará seus dados para encontrar oportunidades de crescimento.
+                  </p>
+               </div>
+             </div>
+          </TabsContent>
+        </Tabs>
       </div>
     </DashboardLayout>
   );

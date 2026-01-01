@@ -4,20 +4,16 @@ import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import DashboardLayout from "@/components/DashboardLayout";
 import { 
-  Zap, 
-  LayoutDashboard, 
-  Package, 
-  ShoppingCart, 
-  Users, 
   BarChart3,
-  TrendingUp,
-  CreditCard,
-  ArrowUpRight,
-  MoreHorizontal,
-  Search,
-  Bell,
-  Plus
+  Plus,
+  MoreHorizontal
 } from "lucide-react";
+import { FinancialOverview } from "@/components/dashboard/FinancialOverview";
+import { SalesChart } from "@/components/dashboard/SalesChart";
+import { ProductMetrics } from "@/components/dashboard/ProductMetrics";
+import { PaymentAnalysis } from "@/components/dashboard/PaymentAnalysis";
+import { AlertsPanel, AlertItem } from "@/components/dashboard/AlertsPanel";
+import { CustomerMetrics } from "@/components/dashboard/CustomerMetrics";
 
 const Dashboard = () => {
   const [userProfile, setUserProfile] = useState<any>(null);
@@ -25,9 +21,15 @@ const Dashboard = () => {
     revenue: 0,
     sales: 0,
     customers: 0,
-    activeProducts: 0
+    activeProducts: 0,
+    pendingBalance: 0,
+    availableBalance: 0
   });
-  const [recentSales, setRecentSales] = useState<any[]>([]);
+  const [topProducts, setTopProducts] = useState<any[]>([]);
+  const [salesChartData, setSalesChartData] = useState<any[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<any[]>([]);
+  const [customerStats, setCustomerStats] = useState({ unique: 0, new: 0, repeatRate: 0, ltv: 0 });
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -44,16 +46,18 @@ const Dashboard = () => {
         if (profile) {
           setUserProfile(profile);
 
-          // Fetch stats
-          const { data: orders } = await supabase
+          // Fetch basic counts
+          const { count: salesCount } = await supabase
             .from('orders')
-            .select('amount, status, customer_id')
+            .select('*', { count: 'exact', head: true })
             .eq('producer_id', profile.id)
             .eq('status', 'approved');
-          
-          const revenue = orders?.reduce((acc, order) => acc + order.amount, 0) || 0;
-          const salesCount = orders?.length || 0;
-          const uniqueCustomers = new Set(orders?.map(o => o.customer_id)).size;
+
+          const { data: customersData } = await supabase
+             .from('orders')
+             .select('customer_id')
+             .eq('producer_id', profile.id);
+          const uniqueCustomersCount = new Set(customersData?.map(o => o.customer_id)).size;
 
           const { count: productsCount } = await supabase
             .from('products')
@@ -61,35 +65,203 @@ const Dashboard = () => {
             .eq('producer_id', profile.id)
             .eq('is_active', true);
 
-          setStats({
-            revenue,
-            sales: salesCount,
-            customers: uniqueCustomers,
-            activeProducts: productsCount || 0
-          });
-
-          // Fetch recent sales
-          const { data: recent } = await supabase
+          // Fetch all orders and withdrawals for financial calculation
+          const { data: allOrders } = await supabase
             .from('orders')
             .select(`
-              id,
               amount,
-              status,
+              net_amount,
+              commission_platform,
+              product_id,
               created_at,
-              customers (
-                full_name,
-                email
-              ),
+              customer_id,
+              status,
+              payment_data,
               products (
                 name
               )
             `)
-            .eq('producer_id', profile.id)
-            .order('created_at', { ascending: false })
-            .limit(5);
+            .eq('producer_id', profile.id);
 
-          if (recent) {
-            setRecentSales(recent);
+          const { data: withdrawals } = await supabase
+            .from('withdrawals')
+            .select('amount, status')
+            .eq('user_id', profile.id);
+            
+          if (allOrders) {
+            // Case-insensitive status check
+            const salesData = allOrders.filter(order => order.status && order.status.toLowerCase() === 'approved');
+            
+            // Financial Calculations
+            const totalSales = salesData.reduce((sum, order) => sum + order.amount, 0);
+            
+            // Calculate Net Income using DB values (Single Source of Truth)
+            // This ensures we match exactly what is in the database (controlled by Triggers)
+            const netIncome = salesData.reduce((sum, order) => sum + (order.net_amount || (order.amount * 0.9)), 0);
+
+            // Calculate Withdrawals
+            const pendingWithdrawal = withdrawals
+                ?.filter(w => w.status === 'pending')
+                .reduce((sum, w) => sum + w.amount, 0) || 0;
+
+            const totalWithdrawn = withdrawals
+                ?.filter(w => ['approved', 'paid'].includes(w.status))
+                .reduce((sum, w) => sum + w.amount, 0) || 0;
+
+            // Available to withdraw = Net Income - (Pending + Withdrawn)
+            const availableToWithdraw = Math.max(0, netIncome - pendingWithdrawal - totalWithdrawn);
+
+            setStats({
+                revenue: totalSales,
+                sales: salesCount || 0,
+                customers: uniqueCustomersCount,
+                activeProducts: productsCount || 0,
+                pendingBalance: pendingWithdrawal,
+                availableBalance: availableToWithdraw
+            });
+
+            // --- 1. Top Products ---
+            const productStats = salesData.reduce((acc: any, sale: any) => {
+              const pid = sale.product_id;
+              if (!acc[pid]) {
+                acc[pid] = {
+                  id: pid,
+                  name: sale.products?.name || 'Produto Desconhecido',
+                  sales: 0,
+                  revenue: 0,
+                  growth: 0 
+                };
+              }
+              acc[pid].sales += 1;
+              acc[pid].revenue += sale.amount;
+              return acc;
+            }, {});
+            
+            const sortedProducts = Object.values(productStats)
+              .sort((a: any, b: any) => b.revenue - a.revenue)
+              .slice(0, 5);
+              
+            setTopProducts(sortedProducts);
+
+            // --- 2. Sales Chart (Pass raw data to component) ---
+            setSalesChartData(salesData);
+
+            // --- 3. Payment Methods ---
+            const paymentCounts = salesData.reduce((acc: any, sale: any) => {
+                // Try to extract method from payment_data
+                let method = 'Desconhecido';
+                if (sale.payment_data) {
+                    // Check common fields based on EMIS/Proxypay/etc
+                    if (sale.payment_data.paymentMethod) method = sale.payment_data.paymentMethod;
+                    else if (sale.payment_data.method) method = sale.payment_data.method;
+                    // If method is still unknown but we have a successful transaction, assume Multicaixa for now as it's dominant
+                    // or check reference format if needed.
+                    else method = 'Multicaixa'; // Default assumption for this market if unspecified
+                } else {
+                    method = 'Multicaixa'; // Fallback
+                }
+                
+                // Normalize names
+                if (method.toLowerCase().includes('multicaixa') || method.toLowerCase().includes('mcx')) method = 'Multicaixa';
+                if (method.toLowerCase().includes('card') || method.toLowerCase().includes('visa') || method.toLowerCase().includes('master')) method = 'Cartão';
+                
+                acc[method] = (acc[method] || 0) + 1;
+                return acc;
+            }, {});
+
+            const totalSalesCount = salesData.length;
+            const paymentMethodsData = Object.entries(paymentCounts).map(([name, count], index) => {
+                const colors = ["#f97316", "#3b82f6", "#22c55e", "#eab308", "#8b5cf6"];
+                return {
+                    name: name,
+                    value: Math.round(((count as number) / totalSalesCount) * 100),
+                    color: colors[index % colors.length]
+                };
+            });
+            setPaymentMethods(paymentMethodsData);
+
+            // --- 4. Customer Metrics ---
+            const uniqueCustomers = new Set(salesData.map((s: any) => s.customer_id));
+            const uniqueCount = uniqueCustomers.size;
+            
+            // New Customers: Count customers whose FIRST order was in the current month
+            const now = new Date(); // Define 'now' before using it
+            const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+            
+            // Group orders by customer
+            const customerOrders: Record<string, Date[]> = {};
+            salesData.forEach((s: any) => {
+                if (!customerOrders[s.customer_id]) customerOrders[s.customer_id] = [];
+                customerOrders[s.customer_id].push(new Date(s.created_at));
+            });
+            
+            let newCustomersCount = 0;
+            let repeatCustomersCount = 0;
+            
+            Object.values(customerOrders).forEach(dates => {
+                // Sort dates
+                dates.sort((a, b) => a.getTime() - b.getTime());
+                const firstOrderDate = dates[0];
+                
+                if (firstOrderDate >= startOfMonth) {
+                    newCustomersCount++;
+                }
+                
+                if (dates.length > 1) {
+                    repeatCustomersCount++;
+                }
+            });
+            
+            const repeatRate = uniqueCount > 0 ? Math.round((repeatCustomersCount / uniqueCount) * 100) : 0;
+            
+            // LTV
+            const totalRevenue = salesData.reduce((acc: number, sale: any) => acc + sale.amount, 0);
+            const ltv = uniqueCount > 0 ? totalRevenue / uniqueCount : 0;
+
+            setCustomerStats({
+                unique: uniqueCount,
+                new: newCustomersCount,
+                repeatRate,
+                ltv
+            });
+
+            // --- 5. Alerts ---
+            const newAlerts: AlertItem[] = [];
+            
+            // Meta (Exemplo: 500k Kz)
+            const MONTHLY_GOAL = 500000;
+            if (totalRevenue >= MONTHLY_GOAL) {
+                newAlerts.push({
+                    type: 'success',
+                    title: 'Meta Atingida',
+                    description: `Você atingiu a meta de ${new Intl.NumberFormat('pt-AO', { style: 'currency', currency: 'AOA' }).format(MONTHLY_GOAL)}!`
+                });
+            }
+
+            // Estoque Baixo (Simulação baseada em produtos com poucas vendas recentes? Não, ideal é ter campo stock. Vamos remover o fake por enquanto ou deixar um placeholder inteligente)
+            // Vamos verificar se há algum produto com muitas vendas hoje (Tendência de alta)
+            if (sortedProducts.length > 0) {
+                const topProduct = sortedProducts[0] as any;
+                if (topProduct.sales > 10) {
+                     newAlerts.push({
+                        type: 'warning', // Warning positivo? Use success ou info. Mas 'warning' é amarelo.
+                        title: 'Alta Demanda',
+                        description: `O produto "${topProduct.name}" teve ${topProduct.sales} vendas.`
+                    });
+                }
+            }
+
+            // Chargeback (Se houver status 'chargeback' ou 'dispute')
+            const chargebacks = allOrders.filter(o => ['chargeback', 'dispute', 'refunded'].includes(o.status));
+            if (chargebacks.length > 0) {
+                 newAlerts.push({
+                    type: 'destructive',
+                    title: 'Chargebacks/Reembolsos Detectados',
+                    description: `Foram identificados ${chargebacks.length} pedidos com problemas (reembolso ou disputa). Verifique imediatamente.`
+                });
+            }
+            
+            setAlerts(newAlerts);
           }
         }
       }
@@ -102,9 +274,11 @@ const Dashboard = () => {
     return new Intl.NumberFormat('pt-AO', { style: 'currency', currency: 'AOA' }).format(price);
   };
 
+  const avgTicket = stats.sales > 0 ? stats.revenue / stats.sales : 0;
+
   return (
     <DashboardLayout>
-      <div className="p-8 space-y-8 animate-fade-in">
+      <div className="p-8 space-y-8 animate-fade-in max-w-[1600px] mx-auto">
         <div className="flex items-center justify-between">
           <div>
             <h1 className="font-display text-3xl font-bold text-foreground">Dashboard</h1>
@@ -124,134 +298,41 @@ const Dashboard = () => {
           </div>
         </div>
 
-        {/* Stats Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-          <div className="bg-card p-6 rounded-2xl border border-border/50 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-4">
-              <div className="w-12 h-12 rounded-xl bg-success/10 flex items-center justify-center">
-                <CreditCard className="w-6 h-6 text-success" />
-              </div>
-              <span className="text-xs font-medium text-success bg-success/10 px-2 py-1 rounded-full flex items-center gap-1">
-                <TrendingUp className="w-3 h-3" />
-                +12%
-              </span>
+        <div className="space-y-6">
+          {/* Seção 1: Visão Geral Financeira */}
+          <FinancialOverview 
+            revenue={stats.revenue}
+            lastDayRevenue={0} // TODO: Implementar comparação real
+            salesCount={stats.sales}
+            avgTicket={avgTicket}
+            pendingBalance={stats.pendingBalance}
+            availableBalance={stats.availableBalance}
+          />
+
+          {/* Seção 2: Gráficos e Alertas */}
+          <div className="grid grid-cols-1 lg:grid-cols-7 gap-6">
+            <div className="col-span-1 lg:col-span-4">
+              <SalesChart orders={salesChartData} />
             </div>
-            <p className="text-sm text-muted-foreground font-medium">Receita Total</p>
-            <h3 className="text-2xl font-bold text-foreground mt-1">{formatPrice(stats.revenue)}</h3>
+            <div className="col-span-1 lg:col-span-3 space-y-6">
+              <AlertsPanel alerts={alerts} />
+              <PaymentAnalysis data={paymentMethods} />
+            </div>
           </div>
 
-          <div className="bg-card p-6 rounded-2xl border border-border/50 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-4">
-              <div className="w-12 h-12 rounded-xl bg-accent/10 flex items-center justify-center">
-                <ShoppingCart className="w-6 h-6 text-accent-foreground" />
-              </div>
-              <span className="text-xs font-medium text-success bg-success/10 px-2 py-1 rounded-full flex items-center gap-1">
-                <TrendingUp className="w-3 h-3" />
-                +8%
-              </span>
+          {/* Seção 3: Métricas de Produtos e Clientes */}
+          <div className="grid grid-cols-1 lg:grid-cols-6 gap-6">
+            <div className="col-span-1 lg:col-span-3">
+              <ProductMetrics products={topProducts} />
             </div>
-            <p className="text-sm text-muted-foreground font-medium">Vendas Realizadas</p>
-            <h3 className="text-2xl font-bold text-foreground mt-1">{stats.sales}</h3>
-          </div>
-
-          <div className="bg-card p-6 rounded-2xl border border-border/50 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-4">
-              <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center">
-                <Users className="w-6 h-6 text-primary" />
-              </div>
-              <span className="text-xs font-medium text-success bg-success/10 px-2 py-1 rounded-full flex items-center gap-1">
-                <TrendingUp className="w-3 h-3" />
-                +24%
-              </span>
+            <div className="col-span-1 lg:col-span-3">
+              <CustomerMetrics 
+                uniqueCustomers={customerStats.unique}
+                newCustomers={customerStats.new}
+                repeatRate={customerStats.repeatRate}
+                ltv={customerStats.ltv}
+              />
             </div>
-            <p className="text-sm text-muted-foreground font-medium">Clientes Únicos</p>
-            <h3 className="text-2xl font-bold text-foreground mt-1">{stats.customers}</h3>
-          </div>
-
-          <div className="bg-card p-6 rounded-2xl border border-border/50 shadow-sm hover:shadow-md transition-shadow">
-            <div className="flex items-center justify-between mb-4">
-              <div className="w-12 h-12 rounded-xl bg-orange-500/10 flex items-center justify-center">
-                <Package className="w-6 h-6 text-orange-500" />
-              </div>
-              <span className="text-xs font-medium text-muted-foreground bg-secondary px-2 py-1 rounded-full">
-                Ativos
-              </span>
-            </div>
-            <p className="text-sm text-muted-foreground font-medium">Produtos Ativos</p>
-            <h3 className="text-2xl font-bold text-foreground mt-1">{stats.activeProducts}</h3>
-          </div>
-        </div>
-
-        {/* Recent Sales */}
-        <div className="bg-card rounded-2xl border border-border/50 shadow-sm overflow-hidden">
-          <div className="p-6 border-b border-border/50 flex items-center justify-between">
-            <h2 className="font-display text-lg font-bold text-foreground">Vendas Recentes</h2>
-            <Button variant="ghost" size="sm" asChild>
-                <Link to="/dashboard/sales">Ver todas</Link>
-            </Button>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-secondary/50">
-                <tr>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Cliente</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Produto</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Valor</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Status</th>
-                  <th className="px-6 py-4 text-left text-xs font-medium text-muted-foreground uppercase tracking-wider">Data</th>
-                  <th className="px-6 py-4 text-right text-xs font-medium text-muted-foreground uppercase tracking-wider">Ações</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border/50">
-                {recentSales.map((sale) => (
-                  <tr key={sale.id} className="hover:bg-secondary/20 transition-colors">
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full bg-gradient-accent flex items-center justify-center text-xs font-bold text-accent-foreground">
-                          {sale.customers?.full_name?.charAt(0) || "C"}
-                        </div>
-                        <div>
-                          <div className="text-sm font-medium text-foreground">{sale.customers?.full_name || "Cliente"}</div>
-                          <div className="text-xs text-muted-foreground">{sale.customers?.email}</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-foreground">
-                      {sale.products?.name}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-foreground">
-                      {formatPrice(sale.amount)}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap">
-                      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                        sale.status === 'approved' 
-                          ? 'bg-success/10 text-success' 
-                          : sale.status === 'pending'
-                          ? 'bg-yellow-500/10 text-yellow-500'
-                          : 'bg-destructive/10 text-destructive'
-                      }`}>
-                        {sale.status === 'approved' ? 'Aprovado' : sale.status === 'pending' ? 'Pendente' : 'Rejeitado'}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-muted-foreground">
-                      {new Date(sale.created_at).toLocaleDateString('pt-AO')}
-                    </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                      <button className="text-muted-foreground hover:text-foreground">
-                        <MoreHorizontal className="w-4 h-4" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-                {recentSales.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-6 py-12 text-center text-muted-foreground">
-                      Nenhuma venda registrada ainda.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
           </div>
         </div>
       </div>

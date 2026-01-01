@@ -12,6 +12,7 @@ const Auth = () => {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [isSignup, setIsSignup] = useState(searchParams.get("mode") === "signup");
+  const [role, setRole] = useState(searchParams.get("role") || "producer"); // producer | member
   const [showPassword, setShowPassword] = useState(false);
   const [formData, setFormData] = useState({
     name: "",
@@ -22,6 +23,7 @@ const Auth = () => {
 
   useEffect(() => {
     setIsSignup(searchParams.get("mode") === "signup");
+    setRole(searchParams.get("role") || "producer");
   }, [searchParams]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -37,6 +39,7 @@ const Auth = () => {
           options: {
             data: {
               full_name: formData.name,
+              role: role // Save role metadata
             },
           },
         });
@@ -48,7 +51,12 @@ const Auth = () => {
           description: "Bem-vindo ao InfoPay.",
         });
         
-        navigate("/dashboard");
+        if (role === 'member') {
+            navigate("/members");
+        } else {
+            navigate("/dashboard");
+        }
+
       } else {
         // Sign in logic
         const { error } = await supabase.auth.signInWithPassword({
@@ -63,7 +71,11 @@ const Auth = () => {
           description: "Bem-vindo de volta.",
         });
         
-        navigate("/dashboard");
+        if (role === 'member') {
+            navigate("/members");
+        } else {
+            navigate("/dashboard");
+        }
       }
     } catch (error: any) {
       console.error("Auth error:", error);
@@ -102,13 +114,12 @@ const Auth = () => {
           {/* Header */}
           <div className="mb-8">
             <h1 className="font-display text-3xl font-bold text-foreground mb-2">
-              {isSignup ? "Crie a sua conta" : "Bem-vindo de volta"}
+              {role === 'member' ? (isSignup ? "Criar conta de Membro" : "Área do Membro") : (isSignup ? "Crie a sua conta" : "Bem-vindo de volta")}
             </h1>
             <p className="text-muted-foreground">
-              {isSignup 
-                ? "Comece a vender os seus infoprodutos hoje mesmo" 
-                : "Entre na sua conta para continuar"
-              }
+              {role === 'member' 
+                ? (isSignup ? "Crie sua conta para acessar seus produtos" : "Entre para acessar seus cursos e downloads") 
+                : (isSignup ? "Comece a vender os seus infoprodutos hoje mesmo" : "Entre na sua conta para continuar")}
             </p>
           </div>
 

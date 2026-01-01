@@ -11,13 +11,21 @@ import {
   BarChart3,
   Settings,
   LogOut,
-  Menu
+  Menu,
+  Store,
+  Briefcase,
+  Wallet
 } from "lucide-react";
+
+import { ProducerSubscriptionScreen } from "./ProducerSubscriptionScreen";
 
 const sidebarItems = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
+  { icon: Store, label: "Marketplace", href: "/dashboard/marketplace" },
+  { icon: Briefcase, label: "Minha Mochila", href: "/dashboard/backpack" },
   { icon: Package, label: "Produtos", href: "/dashboard/products" },
   { icon: ShoppingCart, label: "Vendas", href: "/dashboard/sales" },
+  { icon: Wallet, label: "Financeiro", href: "/dashboard/financial" },
   { icon: Users, label: "Afiliados", href: "/dashboard/affiliates" }, // Renamed from Customers to match SaaS vision better
   { icon: BarChart3, label: "Analytics", href: "/dashboard/analytics" },
   { icon: Settings, label: "Configurações", href: "/dashboard/settings" },
@@ -31,6 +39,7 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [userProfile, setUserProfile] = useState<any>(null);
   const [userEmail, setUserEmail] = useState<string>("");
+  const [hasActiveSubscription, setHasActiveSubscription] = useState<boolean | null>(null);
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -53,6 +62,22 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
       
       if (profile) {
         setUserProfile(profile);
+
+        // Admin bypass
+        if (profile.role === 'admin' || session.user.email === 'leonardo.soares1420@gmail.com') {
+          setHasActiveSubscription(true);
+        } else {
+          // Check for active subscription
+          const { data: subscription } = await supabase
+            .from('saas_subscriptions')
+            .select('*')
+            .eq('user_id', profile.id)
+            .eq('status', 'active')
+            .gt('current_period_end', new Date().toISOString())
+            .maybeSingle();
+
+          setHasActiveSubscription(!!subscription);
+        }
       }
     };
 
@@ -63,6 +88,18 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
     await supabase.auth.signOut();
     navigate("/auth");
   };
+
+  if (hasActiveSubscription === null) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-secondary/30">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+      </div>
+    );
+  }
+
+  if (hasActiveSubscription === false) {
+    return <ProducerSubscriptionScreen onSubscriptionComplete={() => setHasActiveSubscription(true)} />;
+  }
 
   return (
     <div className="min-h-screen bg-secondary/30 flex">
